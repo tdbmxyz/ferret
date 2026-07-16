@@ -25,6 +25,8 @@ pub struct Config {
     /// Product family / sibling-model tables (stuffing + outlier signals).
     pub families: Vec<ProductFamily>,
     pub notifications: NotificationsConfig,
+    /// Optional LLM refinement pass on ambiguous listings.
+    pub llm: LlmConfig,
 }
 
 impl Default for Config {
@@ -36,6 +38,34 @@ impl Default for Config {
             sources: Vec::new(),
             families: Vec::new(),
             notifications: NotificationsConfig::default(),
+            llm: LlmConfig::default(),
+        }
+    }
+}
+
+/// Optional LLM refinement pass. Off unless `enabled = true`; points at
+/// any OpenAI-compatible chat-completions API (default shape: self-hosted
+/// llama-cpp on zeus).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LlmConfig {
+    pub enabled: bool,
+    /// API root, e.g. `http://zeus:8080/v1` — `/chat/completions` is appended.
+    pub base_url: String,
+    pub model: String,
+    /// Bearer token file (agenix) — only for external backends.
+    pub api_key_file: Option<PathBuf>,
+    pub timeout_secs: u64,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: "http://localhost:8080/v1".into(),
+            model: "local".into(),
+            api_key_file: None,
+            timeout_secs: 30,
         }
     }
 }
@@ -153,6 +183,7 @@ mod tests {
         assert_eq!(config.listen.port(), 4800);
         assert!(config.sources.is_empty());
         assert!(config.notifications.ntfy_url.is_none());
+        assert!(!config.llm.enabled, "LLM pass is opt-in");
     }
 
     #[test]

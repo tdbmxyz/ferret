@@ -43,6 +43,18 @@ models = ["2060", "2070", "2080", "3060", "3070", "3080", "3090", "4060", "4070"
 name = "ddr4-kit"
 models = ["8GB", "16GB", "32GB", "64GB"]
 
+# ---- LLM refinement (optional) ----
+# One structured-output call per AMBIGUOUS listing (several sibling models
+# in the title, or a price-outlier flag) refining attributes and adding a
+# genuine / stuffed-title / scam verdict next to the heuristic flags.
+# Fail-open: LLM errors keep the heuristic-only verdict. Off by default.
+# [llm]
+# enabled = true
+# base_url = "http://zeus:8080/v1"   # any OpenAI-compatible API (llama-cpp)
+# model = "local"
+# api_key_file = "/run/agenix/ferret-llm-key"   # external backends only
+# timeout_secs = 30
+
 # ---- notifications ----
 # Push via ntfy; omit the section (or leave ntfy_url unset) to disable.
 # [notifications]
