@@ -60,6 +60,8 @@ mod tests {
             stuffing_score: 0.0,
             flags: vec![],
             status: crate::deal::DealStatus::Active,
+            llm_verdict: None,
+            llm_reason: None,
             first_seen: DateTime::UNIX_EPOCH,
             last_seen: DateTime::UNIX_EPOCH,
         }
