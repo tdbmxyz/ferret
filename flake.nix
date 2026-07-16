@@ -20,8 +20,14 @@
     };
     inherit (pkgs) lib;
 
+    version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
     # Toolchain pinned by rust-toolchain.toml (stable + wasm32/Android targets).
     rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+    rustPlatform = pkgs.makeRustPlatform {
+      cargo = rustToolchain;
+      rustc = rustToolchain;
+    };
 
     # trunk invokes wasm-bindgen; its CLI version must match the wasm-bindgen
     # crate version in Cargo.lock exactly (wasm-bindgen is not semver-stable).
@@ -61,7 +67,62 @@
       pango
       gdk-pixbuf
     ];
+
+    ferret-server = rustPlatform.buildRustPackage {
+      pname = "ferret-server";
+      inherit version;
+      src = self;
+
+      cargoLock.lockFile = ./Cargo.lock;
+
+      # Only the backend: the desktop crate would drag the webkit stack in.
+      cargoBuildFlags = ["-p" "ferret-server"];
+      cargoTestFlags = ["-p" "ferret-server"];
+
+      meta = {
+        description = "ferret backend: scraper, ETL pipeline, deals API";
+        mainProgram = "ferret-server";
+      };
+    };
+
+    ferret-web = pkgs.stdenv.mkDerivation {
+      pname = "ferret-web";
+      inherit version;
+      src = self;
+
+      cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
+
+      nativeBuildInputs = [
+        rustToolchain
+        pkgs.trunk
+        pkgs.binaryen
+        wasm-bindgen-cli
+        pkgs.rustPlatform.cargoSetupHook
+      ];
+
+      buildPhase = ''
+        runHook preBuild
+        export HOME=$TMPDIR
+        cd crates/ferret-web
+        trunk build --release --offline true --dist dist
+        runHook postBuild
+      '';
+
+      installPhase = ''
+        runHook preInstall
+        cp -r dist $out
+        runHook postInstall
+      '';
+
+      meta.description = "ferret web frontend (static trunk dist)";
+    };
   in {
+    packages.${system} = {
+      inherit ferret-server ferret-web;
+      default = ferret-server;
+    };
+
+    nixosModules.ferret = import ./nix/module.nix self;
     devShells.${system}.default = pkgs.mkShell {
       name = "ferret";
 
