@@ -22,7 +22,7 @@ pub fn watch_matches(watch: &Watch, deal: &Deal) -> bool {
         return false;
     }
     if let Some(min_gb) = watch.min_capacity_gb
-        && !deal.capacity_gb.is_some_and(|c| c >= min_gb)
+        && deal.capacity_gb.is_none_or(|c| c < min_gb)
     {
         return false;
     }

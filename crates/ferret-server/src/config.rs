@@ -123,12 +123,13 @@ pub struct NotificationsConfig {
 }
 
 /// Load configuration: defaults ← TOML ← env.
-pub fn load() -> figment::Result<Config> {
+pub fn load() -> anyhow::Result<Config> {
     let path = std::env::var("FERRET_CONFIG").unwrap_or_else(|_| "ferret.toml".into());
-    Figment::from(Serialized::defaults(Config::default()))
+    let config = Figment::from(Serialized::defaults(Config::default()))
         .merge(Toml::file(path))
         .merge(Env::prefixed("FERRET_").split("__"))
-        .extract()
+        .extract()?;
+    Ok(config)
 }
 
 #[cfg(test)]

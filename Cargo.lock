@@ -514,6 +514,7 @@ dependencies = [
  "ferret-domain",
  "figment",
  "futures",
+ "http-body-util",
  "regex",
  "reqwest",
  "scraper",
