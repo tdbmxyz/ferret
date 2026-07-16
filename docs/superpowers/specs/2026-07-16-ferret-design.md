@@ -1,7 +1,7 @@
 # ferret — design spec
 
 Date: 2026-07-16
-Status: approved (brainstorming phase), pending implementation plan
+Status: approved — implementation plan at docs/superpowers/plans/2026-07-16-ferret-core-backend.md
 
 ## Purpose
 
