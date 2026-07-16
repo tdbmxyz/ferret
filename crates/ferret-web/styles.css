@@ -1,0 +1,142 @@
+/* ferret — dark, dense, functional. */
+
+:root {
+  --bg: #14161c;
+  --panel: #1c1f27;
+  --line: #2a2e3a;
+  --text: #d8dbe4;
+  --muted: #8a90a0;
+  --accent: #7c9aff;
+  --ok: #6fdd8b;
+  --warn: #e8b34c;
+  --bad: #e86a6a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, sans-serif;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+}
+
+.brand {
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+
+.topbar nav { display: flex; gap: 0.5rem; }
+
+.topbar button {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.topbar button.active { color: var(--text); background: var(--line); }
+
+main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
+
+.toolbar { margin-bottom: 0.8rem; }
+
+select, input {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  font: inherit;
+}
+
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.8rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover { border-color: var(--accent); }
+button.danger:hover { border-color: var(--bad); color: var(--bad); }
+
+ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
+
+.deal, .watch {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+}
+
+.deal.gone { opacity: 0.5; }
+.watch.inactive { opacity: 0.55; }
+
+.deal-main, .watch-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.deal-main a { color: var(--text); text-decoration: none; }
+.deal-main a:hover { color: var(--accent); text-decoration: underline; }
+
+.price { font-weight: 700; color: var(--accent); white-space: nowrap; }
+
+.deal-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.25rem;
+}
+
+.badge {
+  font-size: 0.78em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+}
+
+.badge.ok { color: var(--ok); border-color: var(--ok); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.badge.bad { color: var(--bad); border-color: var(--bad); }
+.badge.muted { color: var(--muted); }
+
+.muted { color: var(--muted); }
+.error { color: var(--bad); }
+.reason { font-size: 0.85em; margin-top: 0.2rem; font-style: italic; }
+
+.watch-form {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.watch-form input { min-width: 9rem; flex: 1; }
+
+.watch-name { font-weight: 600; }
+
+.watch { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.watch-main { flex-direction: column; align-items: flex-start; gap: 0.1rem; }
+.watch-actions { display: flex; gap: 0.4rem; }

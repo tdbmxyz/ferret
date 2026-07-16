@@ -1,0 +1,13 @@
+[package]
+name = "ferret-client"
+description = "Typed HTTP client for the ferret API (native + wasm)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ferret-domain.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true

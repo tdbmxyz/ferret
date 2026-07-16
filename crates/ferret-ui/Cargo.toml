@@ -1,0 +1,13 @@
+[package]
+name = "ferret-ui"
+description = "Leptos component library shared by web and desktop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ferret-domain.workspace = true
+ferret-client.workspace = true
+leptos.workspace = true
+url.workspace = true
+uuid.workspace = true
+web-sys = { workspace = true, features = ["Window", "Storage"] }

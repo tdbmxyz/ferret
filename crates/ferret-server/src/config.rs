@@ -19,6 +19,9 @@ pub struct Config {
     pub listen: SocketAddr,
     /// SQLite database file (created on first start).
     pub db_path: PathBuf,
+    /// Directory with the built web frontend (trunk dist). When set, the
+    /// server serves it with an SPA fallback to index.html.
+    pub static_dir: Option<PathBuf>,
     pub scrape: ScrapeConfig,
     /// Declarative static-HTML sources (generic scraper engine).
     pub sources: Vec<SourceConfig>,
@@ -36,6 +39,7 @@ impl Default for Config {
         Self {
             listen: ([0, 0, 0, 0], 4800).into(),
             db_path: "ferret.db".into(),
+            static_dir: None,
             scrape: ScrapeConfig::default(),
             sources: Vec::new(),
             families: Vec::new(),
