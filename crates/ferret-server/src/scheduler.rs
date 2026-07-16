@@ -84,8 +84,15 @@ async fn run_source(
         match source.fetch().await {
             Ok(listings) => {
                 let count = listings.len();
-                match pipeline::process_listings(&db, &families, &scrape, listings, notifier.as_ref())
-                    .await
+                match pipeline::process_listings(
+                    &db,
+                    &families,
+                    &scrape,
+                    source.id(),
+                    listings,
+                    notifier.as_ref(),
+                )
+                .await
                 {
                     Ok(stats) => {
                         failures.record_success();
@@ -96,6 +103,7 @@ async fn run_source(
                             updated = stats.updated_deals,
                             skipped = stats.skipped,
                             notified = stats.notified,
+                            gone = stats.gone,
                             "tick done"
                         );
                     }

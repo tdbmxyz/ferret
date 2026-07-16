@@ -9,6 +9,7 @@ db_path = "ferret.db"
 outlier_ratio = 0.5          # price < 0.5 × rolling median → price-outlier flag
 stuffing_threshold = 0.25    # stuffing score ≥ 0.25 → possible-stuffing flag
 failure_alert_after = 5      # consecutive source failures before an ntfy alert
+renotify_drop_pct = 5.0      # re-notify a known match when its price drops ≥ 5%
 
 # ---- declarative sources (generic scraper engine) ----
 # One entry per static-HTML source. JS-heavy or authenticated sources are
@@ -16,7 +17,11 @@ failure_alert_after = 5      # consecutive source failures before an ntfy alert
 
 [[sources]]
 id = "example-board"
+# {page} → page number; {query} → each `queries` entry (url-encoded).
+# Without `queries` the URL is a fixed listing page fetched once per tick;
+# with `queries` the source is searched once per query (marketplace pattern).
 url = "https://deals.example.com/hardware?page={page}"
+# queries = ["rtx 3080", "ironwolf 4tb"]
 item_selector = "div.listing"
 title_selector = "h2.title"
 price_selector = "span.price"

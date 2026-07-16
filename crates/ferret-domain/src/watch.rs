@@ -17,6 +17,9 @@ pub struct Watch {
     pub model: Option<String>,
     /// Minimum extracted capacity in decimal GB.
     pub min_capacity_gb: Option<i64>,
+    /// Plausibility floor: filters accessories and scam placeholder
+    /// prices that title-match the product (veille-prix pattern).
+    pub min_price_cents: Option<i64>,
     pub max_price_cents: Option<i64>,
     pub active: bool,
     pub created_at: DateTime<Utc>,
@@ -31,6 +34,8 @@ pub struct WatchRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub min_capacity_gb: Option<i64>,
+    #[serde(default)]
+    pub min_price_cents: Option<i64>,
     #[serde(default)]
     pub max_price_cents: Option<i64>,
     #[serde(default = "default_true")]
@@ -74,6 +79,7 @@ mod tests {
             family: Some("nvidia-rtx".into()),
             model: Some("3080".into()),
             min_capacity_gb: None,
+            min_price_cents: None,
             max_price_cents: Some(50_000),
             active: true,
             created_at: DateTime::UNIX_EPOCH,

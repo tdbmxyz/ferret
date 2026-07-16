@@ -13,9 +13,17 @@ use crate::scrape::DealSource;
 
 use tower::{Service, ServiceExt};
 
-/// Build the URL for one page: `{page}` substituted when present.
-pub fn page_url(config: &SourceConfig, page: u32) -> String {
-    config.url.replace("{page}", &page.to_string())
+/// Build the URL for one fetch: `{page}` and `{query}` substituted when
+/// present (`{query}` is url-encoded).
+pub fn page_url(config: &SourceConfig, query: Option<&str>, page: u32) -> String {
+    let url = config.url.replace("{page}", &page.to_string());
+    match query {
+        Some(q) => {
+            let encoded: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
+            url.replace("{query}", &encoded)
+        }
+        None => url,
+    }
 }
 
 /// Parse one fetched page into raw listings. Listings missing a title,
@@ -93,29 +101,39 @@ impl DealSource for GenericSource {
     }
 
     async fn fetch(&self) -> anyhow::Result<Vec<RawListing>> {
+        // fixed-page source = one pass with no query
+        let queries: Vec<Option<&str>> = if self.config.queries.is_empty() {
+            vec![None]
+        } else {
+            self.config.queries.iter().map(|q| Some(q.as_str())).collect()
+        };
         let mut all = Vec::new();
-        for page in 1..=self.config.max_pages {
-            let url = page_url(&self.config, page);
-            let base = Url::parse(&url)?;
-            let request = reqwest::Request::new(reqwest::Method::GET, base.clone());
-            let mut client = self.client.clone();
-            let response = client
-                .ready()
-                .await?
-                .call(request)
-                .await?
-                .error_for_status()?;
-            let html = response.text().await?;
-            let listings = parse_listings(&html, &self.config, &base);
-            let empty = listings.is_empty();
-            all.extend(listings);
-            // stop paginating once a page yields nothing
-            if empty {
-                break;
-            }
-            // URL without {page} can't paginate — one fetch only
-            if !self.config.url.contains("{page}") {
-                break;
+        // the same listing can surface for several queries — dedupe by URL
+        let mut seen = std::collections::HashSet::new();
+        for query in queries {
+            for page in 1..=self.config.max_pages {
+                let url = page_url(&self.config, query, page);
+                let base = Url::parse(&url)?;
+                let request = reqwest::Request::new(reqwest::Method::GET, base.clone());
+                let mut client = self.client.clone();
+                let response = client
+                    .ready()
+                    .await?
+                    .call(request)
+                    .await?
+                    .error_for_status()?;
+                let html = response.text().await?;
+                let listings = parse_listings(&html, &self.config, &base);
+                let empty = listings.is_empty();
+                all.extend(listings.into_iter().filter(|l| seen.insert(l.url.clone())));
+                // stop paginating once a page yields nothing
+                if empty {
+                    break;
+                }
+                // URL without {page} can't paginate — one fetch only
+                if !self.config.url.contains("{page}") {
+                    break;
+                }
             }
         }
         Ok(all)
@@ -131,6 +149,7 @@ mod tests {
         SourceConfig {
             id: "example-board".into(),
             url: "https://deals.example.com/hardware?page={page}".into(),
+            queries: Vec::new(),
             item_selector: "div.listing".into(),
             title_selector: "h2.title".into(),
             price_selector: "span.price".into(),
@@ -165,11 +184,21 @@ mod tests {
     #[test]
     fn page_url_substitution() {
         assert_eq!(
-            page_url(&source_config(), 2),
+            page_url(&source_config(), None, 2),
             "https://deals.example.com/hardware?page=2"
         );
         let mut cfg = source_config();
         cfg.url = "https://ex.com/deals".into(); // no {page} placeholder
-        assert_eq!(page_url(&cfg, 2), "https://ex.com/deals");
+        assert_eq!(page_url(&cfg, None, 2), "https://ex.com/deals");
+    }
+
+    #[test]
+    fn query_url_substitution() {
+        let mut cfg = source_config();
+        cfg.url = "https://market.example.com/search?q={query}&page={page}".into();
+        assert_eq!(
+            page_url(&cfg, Some("rtx 3080"), 1),
+            "https://market.example.com/search?q=rtx+3080&page=1"
+        );
     }
 }
