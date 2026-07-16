@@ -15,6 +15,26 @@ pub enum Flag {
     PriceOutlier,
 }
 
+/// Lifecycle of a deal on its source. A deal is never deleted: it goes
+/// `gone` when a successful scrape no longer sees it, and revives to
+/// `active` if it reappears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DealStatus {
+    #[default]
+    Active,
+    Gone,
+}
+
+/// One dated price observation for a deal — at most one per day, the
+/// latest wins. The basis for "price dropped since notified" alerts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PricePoint {
+    /// ISO date (UTC) of the observation.
+    pub day: String,
+    pub price_cents: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Deal {
     pub id: Uuid,
@@ -36,6 +56,7 @@ pub struct Deal {
     /// whole family.
     pub stuffing_score: f64,
     pub flags: Vec<Flag>,
+    pub status: DealStatus,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
 }

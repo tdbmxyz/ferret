@@ -11,7 +11,7 @@ pub mod price;
 pub mod watch;
 
 pub use attributes::ExtractedAttributes;
-pub use deal::{Deal, Flag};
+pub use deal::{Deal, DealStatus, Flag, PricePoint};
 pub use family::{FamilyMatch, ProductFamily};
 pub use listing::RawListing;
 pub use watch::{Watch, WatchRequest};

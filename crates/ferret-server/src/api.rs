@@ -18,6 +18,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/watches", get(list_watches).post(create_watch))
         .route("/api/watches/{id}", axum::routing::put(update_watch).delete(delete_watch))
         .route("/api/deals", get(list_deals))
+        .route("/api/deals/{id}/prices", get(deal_prices))
         .route("/api/families", get(list_families))
         .with_state(state)
 }
@@ -81,6 +82,13 @@ async fn list_deals(
     Query(q): Query<DealsQuery>,
 ) -> Result<Response, ApiError> {
     Ok(Json(state.db.list_deals(q.watch_id).await?).into_response())
+}
+
+async fn deal_prices(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    Ok(Json(state.db.deal_prices(id).await?).into_response())
 }
 
 async fn list_families(State(state): State<AppState>) -> Response {
@@ -157,6 +165,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn deal_prices_endpoint() {
+        let db = Db::connect(FsPath::new(":memory:")).await.unwrap();
+        let deal = ferret_domain::Deal {
+            id: uuid::Uuid::new_v4(),
+            source_id: "src".into(),
+            canonical_url: "https://ex.com/1".into(),
+            title: "RTX 3080".into(),
+            price_cents: 45_000,
+            currency: "EUR".into(),
+            family: None,
+            models: vec![],
+            capacity_gb: None,
+            condition: None,
+            stuffing_score: 0.0,
+            flags: vec![],
+            status: ferret_domain::DealStatus::Active,
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+        };
+        let (stored, _) = db.upsert_deal(&deal).await.unwrap();
+        let app = router(AppState { db, families: Arc::new(Vec::new()) });
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/deals/{}/prices", stored.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let prices: Vec<ferret_domain::PricePoint> = body_json(resp).await;
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices[0].price_cents, 45_000);
     }
 
     #[tokio::test]

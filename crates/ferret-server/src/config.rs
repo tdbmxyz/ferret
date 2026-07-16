@@ -50,6 +50,9 @@ pub struct ScrapeConfig {
     pub stuffing_threshold: f64,
     /// Consecutive failures of one source before an ntfy alert fires.
     pub failure_alert_after: u32,
+    /// Re-notify an already-notified match when its price drops by at
+    /// least this percentage since the last notification.
+    pub renotify_drop_pct: f64,
 }
 
 impl Default for ScrapeConfig {
@@ -58,6 +61,7 @@ impl Default for ScrapeConfig {
             outlier_ratio: 0.5,
             stuffing_threshold: 0.25,
             failure_alert_after: 5,
+            renotify_drop_pct: 5.0,
         }
     }
 }
@@ -70,8 +74,13 @@ pub struct SourceConfig {
     /// Stable id, e.g. "hddboard".
     pub id: String,
     /// Page to fetch. `{page}` is replaced by the page number when
-    /// `max_pages > 1`.
+    /// `max_pages > 1`; `{query}` by each entry of `queries` (url-encoded).
     pub url: String,
+    /// Search queries driven through the `{query}` placeholder — one fetch
+    /// pass per query (marketplace search pattern, from ent/veille-prix).
+    /// Empty = the URL is a fixed listing page, fetched once per tick.
+    #[serde(default)]
+    pub queries: Vec<String>,
     /// CSS selector for one listing container.
     pub item_selector: String,
     /// Selectors relative to the item container.

@@ -26,6 +26,11 @@ pub fn watch_matches(watch: &Watch, deal: &Deal) -> bool {
     {
         return false;
     }
+    if let Some(min) = watch.min_price_cents
+        && deal.price_cents < min
+    {
+        return false;
+    }
     if let Some(max) = watch.max_price_cents
         && deal.price_cents > max
     {
@@ -54,6 +59,7 @@ mod tests {
             condition: None,
             stuffing_score: 0.0,
             flags: vec![],
+            status: crate::deal::DealStatus::Active,
             first_seen: DateTime::UNIX_EPOCH,
             last_seen: DateTime::UNIX_EPOCH,
         }
@@ -66,6 +72,7 @@ mod tests {
             family: Some("nvidia-rtx".into()),
             model: Some("3080".into()),
             min_capacity_gb: None,
+            min_price_cents: None,
             max_price_cents: Some(50_000),
             active: true,
             created_at: DateTime::UNIX_EPOCH,
@@ -113,6 +120,19 @@ mod tests {
         assert!(watch_matches(&w, &d));
         d.capacity_gb = None; // watch demands capacity, deal has none
         assert!(!watch_matches(&w, &d));
+    }
+
+    #[test]
+    fn price_floor_filters_implausible_listings() {
+        // veille-prix pattern: a floor filters accessories ("support RTX
+        // 3080, 15 €") and scam placeholder prices
+        let mut w = watch();
+        w.min_price_cents = Some(20_000);
+        let mut d = deal();
+        d.price_cents = 1_500;
+        assert!(!watch_matches(&w, &d));
+        d.price_cents = 45_000;
+        assert!(watch_matches(&w, &d));
     }
 
     #[test]
