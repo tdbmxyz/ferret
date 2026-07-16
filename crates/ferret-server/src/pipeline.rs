@@ -97,6 +97,8 @@ pub async fn process_listings(
             stuffing_score: fam.stuffing_score,
             flags,
             status: DealStatus::Active,
+            llm_verdict: None,
+            llm_reason: None,
             first_seen: now,
             last_seen: now,
         };
