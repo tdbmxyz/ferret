@@ -1,7 +1,7 @@
 # ferret — design spec
 
 Date: 2026-07-16
-Status: approved — implementation plan at docs/superpowers/plans/2026-07-16-ferret-core-backend.md
+Status: implemented (core backend, lifecycle, LLM pass, Leboncoin source, frontend crates, NixOS module — see docs/superpowers/plans/). Android APK build and zeus host config remain.
 
 ## Purpose
 
