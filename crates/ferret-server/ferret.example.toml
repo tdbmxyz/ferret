@@ -31,6 +31,17 @@ delay_ms = 2000              # politeness: min delay between requests
 max_concurrency = 1          # politeness: concurrent requests cap
 max_pages = 3
 
+# ---- Leboncoin (hand-written plugin) ----
+# Searches Leboncoin and parses the embedded __NEXT_DATA__ JSON. Behind
+# DataDome: the fetch falls back to curl automatically when the plain HTTP
+# client is fingerprint-blocked (403/429). Off by default.
+# [leboncoin]
+# enabled = true
+# queries = ["rtx 3080", "seagate ironwolf 4to"]
+# pages_per_query = 2       # 35 ads per page
+# delay_ms = 2000           # politeness between requests
+# interval_minutes = 30
+
 # ---- product family tables ----
 # Sibling-model lists drive stuffing detection and per-model price history.
 # Adding a generation is a config change, never a code change.

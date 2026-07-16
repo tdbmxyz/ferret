@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     let families = Arc::new(config.families.clone());
 
-    let sources: Vec<(Arc<dyn DealSource>, Duration)> = config
+    let mut sources: Vec<(Arc<dyn DealSource>, Duration)> = config
         .sources
         .iter()
         .map(|sc| {
@@ -67,6 +67,14 @@ async fn main() -> anyhow::Result<()> {
             (source, Duration::from_secs(sc.interval_minutes * 60))
         })
         .collect();
+    if config.leboncoin.enabled && !config.leboncoin.queries.is_empty() {
+        let lbc = &config.leboncoin;
+        let client = politeness::scrape_client(Duration::from_millis(lbc.delay_ms), 1);
+        sources.push((
+            Arc::new(scrape::leboncoin::LeboncoinSource::new(lbc.clone(), client)),
+            Duration::from_secs(lbc.interval_minutes * 60),
+        ));
+    }
     scheduler::spawn_all(
         sources,
         db.clone(),

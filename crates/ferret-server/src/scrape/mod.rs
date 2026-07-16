@@ -3,6 +3,7 @@
 //! hand-written plugins for JS-heavy/authenticated sources.
 
 pub mod generic;
+pub mod leboncoin;
 
 use ferret_domain::RawListing;
 

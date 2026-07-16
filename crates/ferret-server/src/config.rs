@@ -27,6 +27,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     /// Optional LLM refinement pass on ambiguous listings.
     pub llm: LlmConfig,
+    /// Hand-written Leboncoin plugin (occasion, France).
+    pub leboncoin: LeboncoinConfig,
 }
 
 impl Default for Config {
@@ -39,6 +41,35 @@ impl Default for Config {
             families: Vec::new(),
             notifications: NotificationsConfig::default(),
             llm: LlmConfig::default(),
+            leboncoin: LeboncoinConfig::default(),
+        }
+    }
+}
+
+/// Leboncoin plugin (hand-written `DealSource`, not the declarative
+/// engine): searches the given queries and parses the embedded
+/// `__NEXT_DATA__` JSON. Off unless `enabled = true` and non-empty queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LeboncoinConfig {
+    pub enabled: bool,
+    /// Search queries, e.g. ["rtx 3080", "ironwolf 4to"].
+    pub queries: Vec<String>,
+    /// Result pages fetched per query (35 ads/page).
+    pub pages_per_query: u32,
+    /// Politeness: min delay between requests.
+    pub delay_ms: u64,
+    pub interval_minutes: u64,
+}
+
+impl Default for LeboncoinConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            queries: Vec::new(),
+            pages_per_query: 2,
+            delay_ms: 2000,
+            interval_minutes: 30,
         }
     }
 }
