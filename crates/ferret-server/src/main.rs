@@ -84,8 +84,19 @@ async fn main() -> anyhow::Result<()> {
         refiner,
     );
 
-    let app = api::router(state::AppState { db, families })
+    let mut app = api::router(state::AppState { db, families })
+        // The Tauri webview is a foreign origin and the trust model is
+        // LAN/tailnet single-user with no cookies — permissive CORS is fine.
+        .layer(tower_http::cors::CorsLayer::permissive())
         .layer(tower_http::trace::TraceLayer::new_for_http());
+    if let Some(dir) = &config.static_dir {
+        let index = dir.join("index.html");
+        app = app.fallback_service(
+            tower_http::services::ServeDir::new(dir)
+                .fallback(tower_http::services::ServeFile::new(index)),
+        );
+        tracing::info!(dir = %dir.display(), "serving web frontend");
+    }
 
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await

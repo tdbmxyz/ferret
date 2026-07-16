@@ -15,12 +15,21 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/api/health", get(health))
         .route("/api/watches", get(list_watches).post(create_watch))
         .route("/api/watches/{id}", axum::routing::put(update_watch).delete(delete_watch))
         .route("/api/deals", get(list_deals))
         .route("/api/deals/{id}/prices", get(deal_prices))
         .route("/api/families", get(list_families))
         .with_state(state)
+}
+
+async fn health() -> Response {
+    Json(ferret_domain::HealthResponse {
+        status: "ok".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    })
+    .into_response()
 }
 
 struct ApiError(DbError);

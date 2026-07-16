@@ -12,6 +12,15 @@ pub mod refine;
 pub mod watch;
 
 pub use attributes::ExtractedAttributes;
+
+use serde::{Deserialize, Serialize};
+
+/// `GET /api/health` body — the shells' connectivity probe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub version: String,
+}
 pub use deal::{Deal, DealStatus, Flag, LlmVerdict, PricePoint};
 pub use family::{FamilyMatch, ProductFamily};
 pub use listing::RawListing;

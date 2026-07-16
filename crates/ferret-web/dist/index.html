@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ferret</title>
+    <link rel="stylesheet" href="/styles-e0e86ccfcb459ea0.css" integrity="sha384-nRWLteTLU8Bic5MPVjskVpzbtAxuZpm7DaJaLBIP25oHvDSWJ/qHbz4Z3eDUOJp4"/>
+  <link rel="modulepreload" href="/ferret-web-68b0965c758a8447.js" crossorigin="anonymous" integrity="sha384-Qptt8aayP30KCDGltv1AQD6cb4IiwDc4AyNzMQQhr26qhR8sh8KLPVlzOLEPBM7a"><link rel="preload" href="/ferret-web-68b0965c758a8447_bg.wasm" crossorigin="anonymous" integrity="sha384-ma/ZuEbSuY4RDBiC1c3s/g3tJ1Gx9BGxa8kcPiB0YEHusr72wl43F2ZnqmpQdiIu" as="fetch" type="application/wasm"></head>
+  <body>
+<script type="module">
+import init, * as bindings from '/ferret-web-68b0965c758a8447.js';
+const wasm = await init({ module_or_path: '/ferret-web-68b0965c758a8447_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script></body>
+</html>
