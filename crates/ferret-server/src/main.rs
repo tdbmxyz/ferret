@@ -46,6 +46,13 @@ async fn main() -> anyhow::Result<()> {
         None => Arc::new(NoopNotifier),
     };
 
+    let refiner: Option<Arc<dyn llm::LlmRefiner>> = llm::OpenAiRefiner::new(&config.llm)
+        .context("configuring llm refiner")?
+        .map(|r| {
+            tracing::info!(base_url = config.llm.base_url, "llm refinement enabled");
+            Arc::new(r) as Arc<dyn llm::LlmRefiner>
+        });
+
     let families = Arc::new(config.families.clone());
 
     let sources: Vec<(Arc<dyn DealSource>, Duration)> = config
@@ -66,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         families.clone(),
         config.scrape.clone(),
         notifier,
+        refiner,
     );
 
     let app = api::router(state::AppState { db, families })
