@@ -184,6 +184,8 @@ mod tests {
             stuffing_score: 0.0,
             flags: vec![],
             status: ferret_domain::DealStatus::Active,
+            llm_verdict: None,
+            llm_reason: None,
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
         };

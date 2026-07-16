@@ -9,6 +9,7 @@ use ferret_domain::ProductFamily;
 
 use crate::config::ScrapeConfig;
 use crate::db::Db;
+use crate::llm::LlmRefiner;
 use crate::notify::Notify;
 use crate::pipeline;
 use crate::scrape::DealSource;
@@ -59,14 +60,16 @@ pub fn spawn_all(
     families: Arc<Vec<ProductFamily>>,
     scrape: ScrapeConfig,
     notifier: Arc<dyn Notify>,
+    refiner: Option<Arc<dyn LlmRefiner>>,
 ) {
     for (source, interval) in sources {
         let db = db.clone();
         let families = families.clone();
         let scrape = scrape.clone();
         let notifier = notifier.clone();
+        let refiner = refiner.clone();
         tokio::spawn(async move {
-            run_source(source, interval, db, families, scrape, notifier).await;
+            run_source(source, interval, db, families, scrape, notifier, refiner).await;
         });
     }
 }
@@ -78,6 +81,7 @@ async fn run_source(
     families: Arc<Vec<ProductFamily>>,
     scrape: ScrapeConfig,
     notifier: Arc<dyn Notify>,
+    refiner: Option<Arc<dyn LlmRefiner>>,
 ) {
     let mut failures = FailureState::new(scrape.failure_alert_after);
     loop {
@@ -91,6 +95,7 @@ async fn run_source(
                     source.id(),
                     listings,
                     notifier.as_ref(),
+                    refiner.as_deref(),
                 )
                 .await
                 {
@@ -104,6 +109,7 @@ async fn run_source(
                             skipped = stats.skipped,
                             notified = stats.notified,
                             gone = stats.gone,
+                            refined = stats.refined,
                             "tick done"
                         );
                     }

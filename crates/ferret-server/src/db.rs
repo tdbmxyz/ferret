@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use ferret_domain::{Deal, DealStatus, Flag, PricePoint, Watch, WatchRequest};
+use ferret_domain::{Deal, DealStatus, Flag, LlmVerdict, PricePoint, Watch, WatchRequest};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
@@ -147,8 +147,8 @@ impl Db {
                 sqlx::query(
                     "INSERT INTO deals (id, source_id, canonical_url, title, price_cents, currency,
                      family, models, capacity_gb, condition, stuffing_score, flags, status,
-                     first_seen, last_seen)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                     llm_verdict, llm_reason, first_seen, last_seen)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
                 )
                 .bind(deal.id.to_string())
                 .bind(&deal.source_id)
@@ -162,6 +162,8 @@ impl Db {
                 .bind(&deal.condition)
                 .bind(deal.stuffing_score)
                 .bind(serde_json::to_string(&deal.flags).expect("serializing flags"))
+                .bind(deal.llm_verdict.map(verdict_to_str))
+                .bind(&deal.llm_reason)
                 .bind(deal.first_seen.to_rfc3339())
                 .bind(deal.last_seen.to_rfc3339())
                 .execute(&self.pool)
@@ -173,9 +175,14 @@ impl Db {
             Some(row) => {
                 let stored = row_to_deal(&row)?;
                 sqlx::query(
+                    // llm fields COALESCE: a re-scraped deal (in-memory llm
+                    // fields None) must not wipe a stored refinement
                     "UPDATE deals SET title = ?, price_cents = ?, currency = ?, family = ?,
                      models = ?, capacity_gb = ?, condition = ?, stuffing_score = ?, flags = ?,
-                     status = 'active', last_seen = ? WHERE id = ?",
+                     status = 'active',
+                     llm_verdict = COALESCE(?, llm_verdict),
+                     llm_reason = COALESCE(?, llm_reason),
+                     last_seen = ? WHERE id = ?",
                 )
                 .bind(&deal.title)
                 .bind(deal.price_cents)
@@ -186,6 +193,8 @@ impl Db {
                 .bind(&deal.condition)
                 .bind(deal.stuffing_score)
                 .bind(serde_json::to_string(&deal.flags).expect("serializing flags"))
+                .bind(deal.llm_verdict.map(verdict_to_str))
+                .bind(&deal.llm_reason)
                 .bind(deal.last_seen.to_rfc3339())
                 .bind(stored.id.to_string())
                 .execute(&self.pool)
@@ -200,6 +209,8 @@ impl Db {
                     id: stored.id,
                     first_seen: stored.first_seen,
                     status: DealStatus::Active,
+                    llm_verdict: deal.llm_verdict.or(stored.llm_verdict),
+                    llm_reason: deal.llm_reason.clone().or(stored.llm_reason),
                     ..deal.clone()
                 };
                 Ok((merged, outcome))
@@ -244,6 +255,37 @@ impl Db {
             .iter()
             .map(|r| PricePoint { day: r.get("day"), price_cents: r.get("price_cents") })
             .collect())
+    }
+
+    /// Persist an LLM refinement: verdict + reason, and attribute fills for
+    /// values the heuristics left empty. Never overwrites a heuristic
+    /// capacity/condition (COALESCE keeps the stored value). Returns the
+    /// refined deal.
+    pub async fn apply_refinement(
+        &self,
+        deal_id: Uuid,
+        verdict: LlmVerdict,
+        reason: &str,
+        capacity_gb: Option<i64>,
+        condition: Option<&str>,
+    ) -> Result<Deal> {
+        sqlx::query(
+            "UPDATE deals SET llm_verdict = ?, llm_reason = ?,
+             capacity_gb = COALESCE(capacity_gb, ?),
+             condition = COALESCE(condition, ?) WHERE id = ?",
+        )
+        .bind(verdict_to_str(verdict))
+        .bind(reason)
+        .bind(capacity_gb)
+        .bind(condition)
+        .bind(deal_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        let row = sqlx::query("SELECT * FROM deals WHERE id = ?")
+            .bind(deal_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+        row_to_deal(&row)
     }
 
     async fn record_deal_price(&self, deal_id: Uuid, price_cents: i64) -> Result<()> {
@@ -357,6 +399,23 @@ impl Db {
 
 // ---- row mapping ----
 
+fn verdict_to_str(verdict: LlmVerdict) -> &'static str {
+    match verdict {
+        LlmVerdict::Genuine => "genuine",
+        LlmVerdict::StuffedTitle => "stuffed-title",
+        LlmVerdict::Scam => "scam",
+    }
+}
+
+fn verdict_from_str(s: &str) -> Result<LlmVerdict> {
+    match s {
+        "genuine" => Ok(LlmVerdict::Genuine),
+        "stuffed-title" => Ok(LlmVerdict::StuffedTitle),
+        "scam" => Ok(LlmVerdict::Scam),
+        other => Err(DbError::Corrupt(format!("bad llm verdict {other:?}"))),
+    }
+}
+
 fn parse_uuid(s: &str) -> Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| DbError::Corrupt(format!("bad uuid {s:?}: {e}")))
 }
@@ -391,6 +450,10 @@ fn row_to_deal(row: &sqlx::sqlite::SqliteRow) -> Result<Deal> {
         "gone" => DealStatus::Gone,
         other => return Err(DbError::Corrupt(format!("bad deal status {other:?}"))),
     };
+    let llm_verdict = row
+        .get::<Option<String>, _>("llm_verdict")
+        .map(|s| verdict_from_str(&s))
+        .transpose()?;
     Ok(Deal {
         id: parse_uuid(&row.get::<String, _>("id"))?,
         source_id: row.get("source_id"),
@@ -405,6 +468,8 @@ fn row_to_deal(row: &sqlx::sqlite::SqliteRow) -> Result<Deal> {
         stuffing_score: row.get("stuffing_score"),
         flags,
         status,
+        llm_verdict,
+        llm_reason: row.get("llm_reason"),
         first_seen: parse_ts(&row.get::<String, _>("first_seen"))?,
         last_seen: parse_ts(&row.get::<String, _>("last_seen"))?,
     })
@@ -435,6 +500,8 @@ mod tests {
             stuffing_score: 0.0,
             flags: vec![Flag::PossibleStuffing],
             status: DealStatus::Active,
+            llm_verdict: None,
+            llm_reason: None,
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         }
@@ -522,6 +589,53 @@ mod tests {
 
         // other sources are untouched
         assert_eq!(db.mark_gone("other-src", &HashSet::new()).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn refinement_fills_gaps_but_never_overwrites() {
+        let db = test_db().await;
+        let mut d = deal("https://ex.com/1", 45_000);
+        d.condition = Some("used".into()); // heuristic already extracted this
+        d.capacity_gb = None;
+        let (stored, _) = db.upsert_deal(&d).await.unwrap();
+
+        let refined = db
+            .apply_refinement(
+                stored.id,
+                LlmVerdict::StuffedTitle,
+                "title enumerates five sibling GPUs",
+                Some(10),
+                Some("new"), // must NOT replace the heuristic "used"
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refined.llm_verdict, Some(LlmVerdict::StuffedTitle));
+        assert_eq!(refined.llm_reason.as_deref(), Some("title enumerates five sibling GPUs"));
+        assert_eq!(refined.capacity_gb, Some(10), "empty capacity filled");
+        assert_eq!(refined.condition.as_deref(), Some("used"), "heuristic kept");
+        // heuristic flags untouched
+        assert_eq!(refined.flags, vec![Flag::PossibleStuffing]);
+    }
+
+    #[tokio::test]
+    async fn rescrape_keeps_llm_fields() {
+        let db = test_db().await;
+        let (stored, _) = db.upsert_deal(&deal("https://ex.com/1", 45_000)).await.unwrap();
+        db.apply_refinement(stored.id, LlmVerdict::Genuine, "looks fine", None, None)
+            .await
+            .unwrap();
+
+        // re-scrape with fresh (llm-empty) in-memory deal
+        let mut d2 = deal("https://ex.com/1", 42_000);
+        d2.id = Uuid::new_v4();
+        let (updated, _) = db.upsert_deal(&d2).await.unwrap();
+        assert_eq!(updated.llm_verdict, Some(LlmVerdict::Genuine));
+        assert_eq!(updated.llm_reason.as_deref(), Some("looks fine"));
+
+        // and it round-trips through list_deals
+        let listed = db.list_deals(None).await.unwrap();
+        assert_eq!(listed[0].llm_verdict, Some(LlmVerdict::Genuine));
     }
 
     #[tokio::test]

@@ -26,6 +26,16 @@ pub enum DealStatus {
     Gone,
 }
 
+/// LLM relevance verdict for an ambiguous listing. A second, independent
+/// signal — heuristic flags are kept untouched next to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmVerdict {
+    Genuine,
+    StuffedTitle,
+    Scam,
+}
+
 /// One dated price observation for a deal — at most one per day, the
 /// latest wins. The basis for "price dropped since notified" alerts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +67,11 @@ pub struct Deal {
     pub stuffing_score: f64,
     pub flags: Vec<Flag>,
     pub status: DealStatus,
+    /// Verdict of the optional LLM refinement pass; None when the listing
+    /// was unambiguous or the pass is disabled/failed.
+    pub llm_verdict: Option<LlmVerdict>,
+    /// Short model-written justification for the verdict.
+    pub llm_reason: Option<String>,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
 }

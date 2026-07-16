@@ -13,12 +13,13 @@ use std::collections::HashSet;
 use chrono::Utc;
 use ferret_domain::{
     Deal, DealStatus, Flag, ProductFamily, RawListing, attributes, family, matching, normalize,
-    price,
+    price, refine,
 };
 use uuid::Uuid;
 
 use crate::config::ScrapeConfig;
 use crate::db::{Db, UpsertOutcome};
+use crate::llm::{LlmRefiner, RefineInput};
 use crate::notify::Notify;
 
 /// How many recent observations feed the rolling median.
@@ -32,6 +33,8 @@ pub struct PipelineStats {
     pub notified: u64,
     /// Deals of this source no longer seen by this tick.
     pub gone: u64,
+    /// New ambiguous deals refined by the LLM pass this tick.
+    pub refined: u64,
 }
 
 /// Process one source's full fetch from a single scheduler tick.
@@ -46,6 +49,7 @@ pub async fn process_listings(
     source_id: &str,
     listings: Vec<RawListing>,
     notifier: &dyn Notify,
+    refiner: Option<&dyn LlmRefiner>,
 ) -> anyhow::Result<PipelineStats> {
     let mut stats = PipelineStats::default();
     let watches = db.list_watches().await?;
@@ -97,6 +101,8 @@ pub async fn process_listings(
             stuffing_score: fam.stuffing_score,
             flags,
             status: DealStatus::Active,
+            llm_verdict: None,
+            llm_reason: None,
             first_seen: now,
             last_seen: now,
         };
@@ -108,6 +114,42 @@ pub async fn process_listings(
             stats.new_deals += 1;
         } else {
             stats.updated_deals += 1;
+        }
+
+        // -- optional LLM refinement: new ambiguous deals only (a re-scrape
+        //    never re-asks), fail-open on any error --
+        let mut stored = stored;
+        if let Some(refiner) = refiner
+            && was_new
+            && let Some(family_name) = stored.family.clone()
+            && refine::needs_refinement(Some(&family_name), &stored.models, &stored.flags)
+        {
+            let input = RefineInput {
+                title: &stored.title,
+                price_cents: stored.price_cents,
+                currency: &stored.currency,
+                family: &family_name,
+                models: &stored.models,
+                flags: &stored.flags,
+            };
+            match refiner.refine(&input).await {
+                Ok(r) => {
+                    stored = db
+                        .apply_refinement(
+                            stored.id,
+                            r.verdict,
+                            &r.reason,
+                            r.capacity_gb,
+                            r.condition.as_deref(),
+                        )
+                        .await?;
+                    stats.refined += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(deal = %stored.id, error = %e,
+                        "llm refinement failed — keeping heuristic-only verdict");
+                }
+            }
         }
 
         // -- price history: only unambiguous listings feed the median,
@@ -219,14 +261,57 @@ mod tests {
         }]
     }
 
+    /// Canned or failing refiner that counts its calls.
+    struct MockRefiner {
+        calls: Mutex<u32>,
+        result: Option<crate::llm::Refinement>, // None = simulate an LLM error
+    }
+
+    impl MockRefiner {
+        fn returning(r: crate::llm::Refinement) -> Self {
+            Self { calls: Mutex::new(0), result: Some(r) }
+        }
+        fn failing() -> Self {
+            Self { calls: Mutex::new(0), result: None }
+        }
+        fn calls(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmRefiner for MockRefiner {
+        async fn refine(&self, _input: &RefineInput<'_>) -> anyhow::Result<crate::llm::Refinement> {
+            *self.calls.lock().unwrap() += 1;
+            self.result.clone().ok_or_else(|| anyhow::anyhow!("llm backend down"))
+        }
+    }
+
     async fn run(
         db: &Db,
         listings: Vec<RawListing>,
         notifier: &RecordingNotifier,
     ) -> PipelineStats {
-        process_listings(db, &families(), &ScrapeConfig::default(), "test-src", listings, notifier)
-            .await
-            .unwrap()
+        run_with(db, listings, notifier, None).await
+    }
+
+    async fn run_with(
+        db: &Db,
+        listings: Vec<RawListing>,
+        notifier: &RecordingNotifier,
+        refiner: Option<&dyn LlmRefiner>,
+    ) -> PipelineStats {
+        process_listings(
+            db,
+            &families(),
+            &ScrapeConfig::default(),
+            "test-src",
+            listings,
+            notifier,
+            refiner,
+        )
+        .await
+        .unwrap()
     }
 
     async fn setup() -> (Db, RecordingNotifier) {
@@ -349,6 +434,123 @@ mod tests {
         let sent = notifier.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].1.contains("possible-stuffing"), "flag rides in the tags");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_new_deal_is_refined_and_merged() {
+        use ferret_domain::LlmVerdict;
+        let (db, notifier) = setup().await;
+        let refiner = MockRefiner::returning(crate::llm::Refinement {
+            verdict: LlmVerdict::StuffedTitle,
+            reason: "accessory listing".into(),
+            capacity_gb: Some(10),
+            condition: None,
+        });
+        let stats = run_with(
+            &db,
+            vec![listing("Riser for 3070 3080 3090 4080 4090", "400 €", "https://ex.com/s")],
+            &notifier,
+            Some(&refiner),
+        )
+        .await;
+
+        assert_eq!(stats.refined, 1);
+        assert_eq!(refiner.calls(), 1);
+        let deals = db.list_deals(None).await.unwrap();
+        assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::StuffedTitle));
+        assert_eq!(deals[0].llm_reason.as_deref(), Some("accessory listing"));
+        assert_eq!(deals[0].capacity_gb, Some(10), "empty capacity filled by LLM");
+        // heuristic signal untouched, deal still matched + notified
+        assert!(deals[0].flags.contains(&ferret_domain::Flag::PossibleStuffing));
+        assert_eq!(notifier.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refinement_never_overwrites_heuristic_condition() {
+        use ferret_domain::LlmVerdict;
+        let (db, notifier) = setup().await;
+        let refiner = MockRefiner::returning(crate::llm::Refinement {
+            verdict: LlmVerdict::Genuine,
+            reason: "bundle of two GPUs".into(),
+            capacity_gb: None,
+            condition: Some("new".into()), // heuristics will already say "used"
+        });
+        run_with(
+            &db,
+            vec![listing("RTX 3080 + 3090 occasion", "800 €", "https://ex.com/b")],
+            &notifier,
+            Some(&refiner),
+        )
+        .await;
+
+        let deals = db.list_deals(None).await.unwrap();
+        assert_eq!(deals[0].condition.as_deref(), Some("used"), "heuristic wins");
+        assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::Genuine));
+    }
+
+    #[tokio::test]
+    async fn llm_failure_is_fail_open() {
+        let (db, notifier) = setup().await;
+        let refiner = MockRefiner::failing();
+        let stats = run_with(
+            &db,
+            vec![listing("Riser for 3070 3080 3090", "400 €", "https://ex.com/s")],
+            &notifier,
+            Some(&refiner),
+        )
+        .await;
+
+        assert_eq!(stats.refined, 0);
+        assert_eq!(refiner.calls(), 1);
+        let deals = db.list_deals(None).await.unwrap();
+        assert_eq!(deals.len(), 1, "deal persisted despite LLM failure");
+        assert_eq!(deals[0].llm_verdict, None);
+        // heuristic pipeline unaffected: match + notification still fired
+        assert_eq!(notifier.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn clean_listing_never_touches_the_llm() {
+        use ferret_domain::LlmVerdict;
+        let (db, notifier) = setup().await;
+        let refiner = MockRefiner::returning(crate::llm::Refinement {
+            verdict: LlmVerdict::Genuine,
+            reason: String::new(),
+            capacity_gb: None,
+            condition: None,
+        });
+        run_with(
+            &db,
+            vec![
+                listing("RTX 3080 FE occasion", "450 €", "https://ex.com/1"), // clean
+                listing("4TB IronWolf NAS", "90 €", "https://ex.com/2"),      // no family
+            ],
+            &notifier,
+            Some(&refiner),
+        )
+        .await;
+        assert_eq!(refiner.calls(), 0, "common case must not burn LLM calls");
+    }
+
+    #[tokio::test]
+    async fn rescrape_does_not_rerefine() {
+        use ferret_domain::LlmVerdict;
+        let (db, notifier) = setup().await;
+        let refiner = MockRefiner::returning(crate::llm::Refinement {
+            verdict: LlmVerdict::StuffedTitle,
+            reason: "stuffed".into(),
+            capacity_gb: None,
+            condition: None,
+        });
+        let l = listing("Riser for 3070 3080 3090", "400 €", "https://ex.com/s");
+        run_with(&db, vec![l.clone()], &notifier, Some(&refiner)).await;
+        let stats = run_with(&db, vec![l], &notifier, Some(&refiner)).await;
+
+        assert_eq!(refiner.calls(), 1, "only the first sighting is refined");
+        assert_eq!(stats.refined, 0);
+        // stored verdict survives the re-scrape
+        let deals = db.list_deals(None).await.unwrap();
+        assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::StuffedTitle));
     }
 
     #[tokio::test]

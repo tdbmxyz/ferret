@@ -52,6 +52,19 @@ mod tests {
     use crate::deal::Flag;
 
     #[test]
+    fn llm_verdict_serializes_kebab_case() {
+        use crate::deal::LlmVerdict;
+        assert_eq!(
+            serde_json::to_string(&LlmVerdict::StuffedTitle).unwrap(),
+            "\"stuffed-title\""
+        );
+        assert_eq!(
+            serde_json::from_str::<LlmVerdict>("\"scam\"").unwrap(),
+            LlmVerdict::Scam
+        );
+    }
+
+    #[test]
     fn flag_serializes_kebab_case() {
         assert_eq!(
             serde_json::to_string(&Flag::PossibleStuffing).unwrap(),
