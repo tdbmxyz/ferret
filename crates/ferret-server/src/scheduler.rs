@@ -5,7 +5,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferret_domain::ProductFamily;
+use chrono::Utc;
+use ferret_domain::{ProductFamily, SourceStatus, TickStats};
 
 use crate::config::ScrapeConfig;
 use crate::db::Db;
@@ -13,6 +14,7 @@ use crate::llm::LlmRefiner;
 use crate::notify::Notify;
 use crate::pipeline;
 use crate::scrape::DealSource;
+use crate::state::StatusMap;
 
 const BACKOFF_BASE: Duration = Duration::from_secs(60);
 const BACKOFF_CAP: Duration = Duration::from_secs(3600);
@@ -61,6 +63,7 @@ pub fn spawn_all(
     scrape: ScrapeConfig,
     notifier: Arc<dyn Notify>,
     refiner: Option<Arc<dyn LlmRefiner>>,
+    statuses: StatusMap,
 ) {
     for (source, interval) in sources {
         let db = db.clone();
@@ -68,12 +71,38 @@ pub fn spawn_all(
         let scrape = scrape.clone();
         let notifier = notifier.clone();
         let refiner = refiner.clone();
+        let statuses = statuses.clone();
         tokio::spawn(async move {
-            run_source(source, interval, db, families, scrape, notifier, refiner).await;
+            // register as idle right away so /api/status lists the source
+            // before its first tick completes
+            statuses.write().await.insert(
+                source.id().to_string(),
+                SourceStatus::idle(source.id(), interval.as_secs() / 60),
+            );
+            run_source(source, interval, db, families, scrape, notifier, refiner, statuses).await;
         });
     }
 }
 
+async fn record_tick(statuses: &StatusMap, source_id: &str, result: Result<TickStats, String>) {
+    let mut map = statuses.write().await;
+    if let Some(status) = map.get_mut(source_id) {
+        status.last_tick = Some(Utc::now());
+        match result {
+            Ok(stats) => {
+                status.last_stats = Some(stats);
+                status.last_error = None;
+                status.consecutive_failures = 0;
+            }
+            Err(error) => {
+                status.last_error = Some(error);
+                status.consecutive_failures += 1;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_source(
     source: Arc<dyn DealSource>,
     interval: Duration,
@@ -82,6 +111,7 @@ async fn run_source(
     scrape: ScrapeConfig,
     notifier: Arc<dyn Notify>,
     refiner: Option<Arc<dyn LlmRefiner>>,
+    statuses: StatusMap,
 ) {
     let mut failures = FailureState::new(scrape.failure_alert_after);
     loop {
@@ -112,11 +142,26 @@ async fn run_source(
                             refined = stats.refined,
                             "tick done"
                         );
+                        record_tick(
+                            &statuses,
+                            source.id(),
+                            Ok(TickStats {
+                                fetched: count as u64,
+                                new_deals: stats.new_deals,
+                                updated_deals: stats.updated_deals,
+                                skipped: stats.skipped,
+                                notified: stats.notified,
+                                gone: stats.gone,
+                                refined: stats.refined,
+                            }),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         // pipeline (db) errors also count as failures
                         let backoff = failures.record_failure();
                         tracing::error!(source = source.id(), error = %e, ?backoff, "pipeline failed");
+                        record_tick(&statuses, source.id(), Err(e.to_string())).await;
                         maybe_alert(&mut failures, source.id(), &e, notifier.as_ref()).await;
                         tokio::time::sleep(backoff).await;
                         continue;
@@ -126,6 +171,7 @@ async fn run_source(
             Err(e) => {
                 let backoff = failures.record_failure();
                 tracing::warn!(source = source.id(), error = %e, ?backoff, "fetch failed");
+                record_tick(&statuses, source.id(), Err(e.to_string())).await;
                 maybe_alert(&mut failures, source.id(), &e, notifier.as_ref()).await;
                 tokio::time::sleep(backoff).await;
                 continue;

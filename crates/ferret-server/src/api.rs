@@ -16,6 +16,7 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/status", get(status))
         .route("/api/watches", get(list_watches).post(create_watch))
         .route("/api/watches/{id}", axum::routing::put(update_watch).delete(delete_watch))
         .route("/api/deals", get(list_deals))
@@ -53,6 +54,13 @@ impl IntoResponse for ApiError {
     }
 }
 
+async fn status(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let mut sources: Vec<_> = state.statuses.read().await.values().cloned().collect();
+    sources.sort_by(|a, b| a.source_id.cmp(&b.source_id));
+    let watch_matches = state.db.count_matches().await?;
+    Ok(Json(ferret_domain::StatusResponse { sources, watch_matches }).into_response())
+}
+
 async fn list_watches(State(state): State<AppState>) -> Result<Response, ApiError> {
     Ok(Json(state.db.list_watches().await?).into_response())
 }
@@ -62,6 +70,12 @@ async fn create_watch(
     Json(req): Json<WatchRequest>,
 ) -> Result<Response, ApiError> {
     let watch = state.db.create_watch(&req).await?;
+    if let Err(e) =
+        crate::watches::retro_match(&state.db, state.notifier.as_ref(), &watch, "created").await
+    {
+        // feedback is best-effort; the watch itself is saved
+        tracing::warn!(error = %e, "retro-match after create failed");
+    }
     Ok((StatusCode::CREATED, Json(watch)).into_response())
 }
 
@@ -70,7 +84,13 @@ async fn update_watch(
     Path(id): Path<Uuid>,
     Json(req): Json<WatchRequest>,
 ) -> Result<Response, ApiError> {
-    Ok(Json(state.db.update_watch(id, &req).await?).into_response())
+    let watch = state.db.update_watch(id, &req).await?;
+    if let Err(e) =
+        crate::watches::retro_match(&state.db, state.notifier.as_ref(), &watch, "updated").await
+    {
+        tracing::warn!(error = %e, "retro-match after update failed");
+    }
+    Ok(Json(watch).into_response())
 }
 
 async fn delete_watch(
@@ -120,7 +140,12 @@ mod tests {
 
     async fn app() -> Router {
         let db = Db::connect(FsPath::new(":memory:")).await.unwrap();
-        router(AppState { db, families: Arc::new(Vec::new()) })
+        router(AppState {
+            db,
+            families: Arc::new(Vec::new()),
+            notifier: Arc::new(crate::notify::NoopNotifier),
+            statuses: Arc::new(tokio::sync::RwLock::new(Default::default())),
+        })
     }
 
     async fn body_json<T: serde::de::DeserializeOwned>(resp: Response) -> T {
@@ -199,7 +224,12 @@ mod tests {
             last_seen: chrono::Utc::now(),
         };
         let (stored, _) = db.upsert_deal(&deal).await.unwrap();
-        let app = router(AppState { db, families: Arc::new(Vec::new()) });
+        let app = router(AppState {
+            db,
+            families: Arc::new(Vec::new()),
+            notifier: Arc::new(crate::notify::NoopNotifier),
+            statuses: Arc::new(tokio::sync::RwLock::new(Default::default())),
+        });
 
         let resp = app
             .oneshot(

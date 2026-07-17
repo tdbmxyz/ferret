@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use ferret_domain::{Deal, HealthResponse, PricePoint, ProductFamily, Watch, WatchRequest};
+use ferret_domain::{
+    Deal, HealthResponse, PricePoint, ProductFamily, StatusResponse, Watch, WatchRequest,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -83,6 +85,11 @@ impl FerretClient {
 
     pub async fn health(&self) -> Result<HealthResponse> {
         self.send(self.http.get(self.url("api/health")?), HEALTH_TIMEOUT).await
+    }
+
+    /// Scheduler liveness per source + match counts per watch.
+    pub async fn status(&self) -> Result<StatusResponse> {
+        self.get("api/status").await
     }
 
     // ---- watches ----

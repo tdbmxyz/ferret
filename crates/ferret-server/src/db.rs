@@ -367,6 +367,18 @@ impl Db {
         Ok(row.and_then(|r| r.get::<Option<i64>, _>("notified_price_cents")))
     }
 
+    /// Current match count per watch (watches with none are absent).
+    pub async fn count_matches(&self) -> Result<std::collections::HashMap<Uuid, i64>> {
+        let rows = sqlx::query(
+            "SELECT watch_id, COUNT(*) AS n FROM deal_matches GROUP BY watch_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| Ok((parse_uuid(&r.get::<String, _>("watch_id"))?, r.get::<i64, _>("n"))))
+            .collect()
+    }
+
     // ---- price history ----
 
     pub async fn record_price(&self, family: &str, model: &str, price_cents: i64) -> Result<()> {

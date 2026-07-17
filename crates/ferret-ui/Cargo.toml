@@ -8,6 +8,7 @@ edition.workspace = true
 ferret-domain.workspace = true
 ferret-client.workspace = true
 leptos.workspace = true
+chrono.workspace = true
 url.workspace = true
 uuid.workspace = true
 web-sys = { workspace = true, features = ["Window", "Storage", "Location"] }
