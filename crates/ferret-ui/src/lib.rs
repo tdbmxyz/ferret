@@ -3,6 +3,8 @@
 //! (where the API lives) is injected from the outside via [`AppConfig`].
 
 mod deals;
+mod sparkline;
+mod status;
 mod watches;
 
 use ferret_client::FerretClient;
@@ -35,6 +37,15 @@ const API_BASE_KEY: &str = "ferret-api-base";
 pub fn App(config: AppConfig) -> impl IntoView {
     provide_context(FerretClient::new(config.api_base.clone()));
     provide_context(DataVersion(RwSignal::new(0)));
+    // app-wide refresh pulse: drives the status strip (and match counts)
+    let status_tick = RwSignal::new(0u32);
+    if let Ok(handle) = set_interval_with_handle(
+        move || status_tick.update(|n| *n += 1),
+        std::time::Duration::from_secs(30),
+    ) {
+        on_cleanup(move || handle.clear());
+    }
+    status::provide_status(status_tick);
     let tab = RwSignal::new(Tab::Deals);
     let show_connect = RwSignal::new(false);
     let server = RwSignal::new(config.api_base.to_string());

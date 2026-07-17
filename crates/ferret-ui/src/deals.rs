@@ -42,6 +42,7 @@ pub fn DealsView() -> impl IntoView {
 
     view! {
         <section>
+            <crate::status::SourcesStrip/>
             <div class="toolbar">
                 <label>
                     "Watch: "
@@ -72,7 +73,10 @@ pub fn DealsView() -> impl IntoView {
                 }
                 Some(Ok(deals)) => view! {
                     <ul class="deals">
-                        {deals.into_iter().map(deal_card).collect_view()}
+                        {deals
+                            .into_iter()
+                            .map(|deal| view! { <DealCard deal=deal/> })
+                            .collect_view()}
                     </ul>
                 }
                 .into_any(),
@@ -81,7 +85,23 @@ pub fn DealsView() -> impl IntoView {
     }
 }
 
-fn deal_card(deal: Deal) -> impl IntoView {
+#[component]
+fn DealCard(deal: Deal) -> impl IntoView {
+    let client: FerretClient = expect_context();
+    let expanded = RwSignal::new(false);
+    let deal_id = deal.id;
+    // fetched lazily: nothing hits the network until the card is opened
+    let prices = LocalResource::new(move || {
+        let open = expanded.get();
+        let client = client.clone();
+        async move {
+            if !open {
+                return None;
+            }
+            client.deal_prices(deal_id).await.ok()
+        }
+    });
+    let currency = deal.currency.clone();
     let gone = deal.status == DealStatus::Gone;
     let mut badges: Vec<(String, &'static str)> = Vec::new();
     for flag in &deal.flags {
@@ -113,9 +133,10 @@ fn deal_card(deal: Deal) -> impl IntoView {
     }
 
     view! {
-        <li class="deal" class:gone=gone>
+        <li class="deal" class:gone=gone on:click=move |_| expanded.update(|e| *e = !*e)>
             <div class="deal-main">
-                <a href=deal.canonical_url.clone() target="_blank" rel="noreferrer">
+                <a href=deal.canonical_url.clone() target="_blank" rel="noreferrer"
+                    on:click=move |ev| ev.stop_propagation()>
                     {deal.title.clone()}
                 </a>
                 <span class="price">{format_price(deal.price_cents, &deal.currency)}</span>
@@ -128,6 +149,15 @@ fn deal_card(deal: Deal) -> impl IntoView {
                     .collect_view()}
             </div>
             {deal.llm_reason.map(|reason| view! { <div class="muted reason">{reason}</div> })}
+            {move || {
+                expanded.get().then(|| match prices.get().flatten() {
+                    None => view! { <p class="muted">"Loading price history…"</p> }.into_any(),
+                    Some(points) => {
+                        view! { <crate::sparkline::Sparkline prices=points currency=currency.clone()/> }
+                            .into_any()
+                    }
+                })
+            }}
         </li>
     }
 }

@@ -154,3 +154,19 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
 }
 
 .connect input { min-width: 16rem; }
+
+.sources {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.8rem;
+}
+
+.deal { cursor: pointer; }
+
+.spark {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-top: 0.4rem;
+}

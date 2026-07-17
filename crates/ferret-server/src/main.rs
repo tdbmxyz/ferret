@@ -8,6 +8,7 @@ mod politeness;
 mod scheduler;
 mod scrape;
 mod state;
+mod watches;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,6 +91,8 @@ async fn main() -> anyhow::Result<()> {
             Duration::from_secs(ebay.interval_minutes * 60),
         ));
     }
+    let statuses: state::StatusMap = Arc::new(tokio::sync::RwLock::new(Default::default()));
+    let notifier_api = notifier.clone();
     scheduler::spawn_all(
         sources,
         db.clone(),
@@ -97,9 +100,15 @@ async fn main() -> anyhow::Result<()> {
         config.scrape.clone(),
         notifier,
         refiner,
+        statuses.clone(),
     );
 
-    let mut app = api::router(state::AppState { db, families })
+    let mut app = api::router(state::AppState {
+        db,
+        families,
+        notifier: notifier_api,
+        statuses: statuses.clone(),
+    })
         // The Tauri webview is a foreign origin and the trust model is
         // LAN/tailnet single-user with no cookies — permissive CORS is fine.
         .layer(tower_http::cors::CorsLayer::permissive())

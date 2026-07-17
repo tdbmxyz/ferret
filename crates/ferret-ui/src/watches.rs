@@ -128,6 +128,16 @@ pub fn WatchesView() -> impl IntoView {
 fn watch_row(watch: Watch) -> impl IntoView {
     let client: FerretClient = expect_context();
     let version: DataVersion = expect_context();
+    let status: crate::status::StatusResource = expect_context();
+    let watch_id = watch.id;
+    let match_count = move || {
+        status
+            .0
+            .get()
+            .flatten()
+            .and_then(|s| s.watch_matches.get(&watch_id).copied())
+            .unwrap_or(0)
+    };
 
     let mut filters: Vec<String> = Vec::new();
     if let Some(f) = &watch.family {
@@ -182,7 +192,11 @@ fn watch_row(watch: Watch) -> impl IntoView {
     view! {
         <li class="watch" class:inactive=!watch.active>
             <div class="watch-main">
-                <span class="watch-name">{watch.name.clone()}</span>
+                <span class="watch-name">
+                    {watch.name.clone()}
+                    " "
+                    <span class="badge ok">{move || format!("{} deals", match_count())}</span>
+                </span>
                 <span class="muted">{filters.join(" · ")}</span>
             </div>
             <div class="watch-actions">
