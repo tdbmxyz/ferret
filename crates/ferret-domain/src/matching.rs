@@ -26,6 +26,14 @@ pub fn watch_matches(watch: &Watch, deal: &Deal) -> bool {
     {
         return false;
     }
+    if let Some(category) = &watch.category {
+        if deal.category.as_ref() != Some(category) {
+            return false;
+        }
+        if !crate::category::filters_match(&watch.spec_filters, &deal.specs) {
+            return false;
+        }
+    }
     if let Some(min) = watch.min_price_cents
         && deal.price_cents < min
     {
@@ -62,6 +70,8 @@ mod tests {
             status: crate::deal::DealStatus::Active,
             llm_verdict: None,
             llm_reason: None,
+            category: None,
+            specs: Default::default(),
             first_seen: DateTime::UNIX_EPOCH,
             last_seen: DateTime::UNIX_EPOCH,
         }
@@ -76,6 +86,9 @@ mod tests {
             min_capacity_gb: None,
             min_price_cents: None,
             max_price_cents: Some(50_000),
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
             active: true,
             created_at: DateTime::UNIX_EPOCH,
         }
@@ -135,6 +148,28 @@ mod tests {
         assert!(!watch_matches(&w, &d));
         d.price_cents = 45_000;
         assert!(watch_matches(&w, &d));
+    }
+
+    #[test]
+    fn category_watch_gates_on_category_and_spec_filters() {
+        use crate::category::{SpecFilter, SpecValue};
+        let mut w = watch();
+        w.family = None;
+        w.model = None;
+        w.category = Some("hdd".into());
+        w.spec_filters = vec![SpecFilter::Min { key: "capacity".into(), value: 4000.0 }];
+
+        let mut d = deal();
+        assert!(!watch_matches(&w, &d), "uncategorized deal rejected");
+
+        d.category = Some("hdd".into());
+        assert!(!watch_matches(&w, &d), "capacity missing → filter fails");
+
+        d.specs.insert("capacity".into(), SpecValue::Number(4000.0));
+        assert!(watch_matches(&w, &d));
+
+        d.category = Some("ssd".into());
+        assert!(!watch_matches(&w, &d), "wrong category rejected");
     }
 
     #[test]

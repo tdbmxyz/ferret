@@ -95,6 +95,8 @@ mod tests {
             status: DealStatus::Active,
             llm_verdict: None,
             llm_reason: None,
+            category: None,
+            specs: Default::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         }
@@ -121,7 +123,10 @@ mod tests {
                 min_capacity_gb: None,
                 min_price_cents: None,
                 max_price_cents: Some(50_000),
-                active: true,
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
+            active: true,
             })
             .await
             .unwrap();
@@ -159,7 +164,10 @@ mod tests {
                 min_capacity_gb: Some(4000),
                 min_price_cents: None,
                 max_price_cents: None,
-                active: true,
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
+            active: true,
             })
             .await
             .unwrap();

@@ -170,3 +170,42 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
   gap: 0.8rem;
   margin-top: 0.4rem;
 }
+
+.guided {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.guided-input { display: flex; gap: 0.5rem; }
+.guided-text { flex: 1; }
+
+.guided-result { margin-top: 0.6rem; }
+
+.proposal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  border: 1px dashed var(--warn);
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  margin: 0.5rem 0;
+}
+.proposal button { align-self: flex-start; }
+
+.spec-controls {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0;
+}
+
+.spec { display: flex; align-items: center; gap: 0.4rem; color: var(--muted); }
+.narrow { width: 5.5rem; }
+
+.guided-save { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0; }
+.guided-save input { min-width: 8rem; }
+
+.preview { margin-top: 0.5rem; }

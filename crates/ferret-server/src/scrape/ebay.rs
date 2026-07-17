@@ -95,11 +95,17 @@ fn extract_item_id(href: &str) -> Option<String> {
 pub struct EbaySource {
     config: EbayConfig,
     client: ScrapeClient,
+    /// live watch queries merged in at fetch time (None for one-shot searches)
+    extra: Option<crate::state::SharedQueries>,
 }
 
 impl EbaySource {
-    pub fn new(config: EbayConfig, client: ScrapeClient) -> Self {
-        Self { config, client }
+    pub fn new(
+        config: EbayConfig,
+        client: ScrapeClient,
+        extra: Option<crate::state::SharedQueries>,
+    ) -> Self {
+        Self { config, client, extra }
     }
 
     async fn fetch_page(&self, url: &str) -> anyhow::Result<String> {
@@ -158,9 +164,17 @@ impl DealSource for EbaySource {
     }
 
     async fn fetch(&self) -> anyhow::Result<Vec<RawListing>> {
+        let mut queries = self.config.queries.clone();
+        if let Some(extra) = &self.extra {
+            for q in extra.read().await.iter() {
+                if !queries.contains(q) {
+                    queries.push(q.clone());
+                }
+            }
+        }
         let mut all = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for query in &self.config.queries {
+        for query in &queries {
             let html = self.fetch_page(&search_url(query)).await?;
             let listings = parse_search_page(&html)?;
             all.extend(listings.into_iter().filter(|l| seen.insert(l.url.clone())));
@@ -217,10 +231,11 @@ mod tests {
             interval_minutes: 60,
             fetch_command: vec!["cat".into(), "tests/fixtures/ebay_search.html".into()],
         };
-        let source = EbaySource::new(config, crate::politeness::scrape_client(
-            std::time::Duration::ZERO,
-            1,
-        ));
+        let source = EbaySource::new(
+            config,
+            crate::politeness::scrape_client(std::time::Duration::ZERO, 1),
+            None,
+        );
         let listings = source.fetch().await.unwrap();
         assert_eq!(listings.len(), 2);
         assert_eq!(listings[0].source_id, "ebay");
@@ -235,10 +250,11 @@ mod tests {
             interval_minutes: 60,
             fetch_command: vec!["false".into()],
         };
-        let source = EbaySource::new(config, crate::politeness::scrape_client(
-            std::time::Duration::ZERO,
-            1,
-        ));
+        let source = EbaySource::new(
+            config,
+            crate::politeness::scrape_client(std::time::Duration::ZERO, 1),
+            None,
+        );
         assert!(source.fetch().await.is_err());
     }
 

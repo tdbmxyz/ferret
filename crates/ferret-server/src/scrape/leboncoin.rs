@@ -110,11 +110,17 @@ pub fn parse_search_page(html: &str) -> anyhow::Result<Vec<RawListing>> {
 pub struct LeboncoinSource {
     config: LeboncoinConfig,
     client: ScrapeClient,
+    /// live watch queries merged in at fetch time (None for one-shot searches)
+    extra: Option<crate::state::SharedQueries>,
 }
 
 impl LeboncoinSource {
-    pub fn new(config: LeboncoinConfig, client: ScrapeClient) -> Self {
-        Self { config, client }
+    pub fn new(
+        config: LeboncoinConfig,
+        client: ScrapeClient,
+        extra: Option<crate::state::SharedQueries>,
+    ) -> Self {
+        Self { config, client, extra }
     }
 
     /// Fetch one URL: polite reqwest first; DataDome fingerprint blocks
@@ -161,9 +167,17 @@ impl DealSource for LeboncoinSource {
     }
 
     async fn fetch(&self) -> anyhow::Result<Vec<RawListing>> {
+        let mut queries = self.config.queries.clone();
+        if let Some(extra) = &self.extra {
+            for q in extra.read().await.iter() {
+                if !queries.contains(q) {
+                    queries.push(q.clone());
+                }
+            }
+        }
         let mut all = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for query in &self.config.queries {
+        for query in &queries {
             for page in 1..=self.config.pages_per_query.max(1) {
                 let html = self.fetch_page(&search_url(query, page)).await?;
                 let listings = parse_search_page(&html)?;

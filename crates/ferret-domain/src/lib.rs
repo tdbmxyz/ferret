@@ -2,6 +2,7 @@
 //! deterministic and unit-testable without a runtime.
 
 pub mod attributes;
+pub mod category;
 pub mod deal;
 pub mod family;
 pub mod listing;
@@ -13,6 +14,10 @@ pub mod status;
 pub mod watch;
 
 pub use attributes::ExtractedAttributes;
+pub use category::{
+    Category, CategoryOrigin, CategorySpec, CategoryStatus, Interpretation, SpecFilter, SpecKind,
+    SpecValue,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,5 +30,5 @@ pub struct HealthResponse {
 pub use deal::{Deal, DealStatus, Flag, LlmVerdict, PricePoint};
 pub use family::{FamilyMatch, ProductFamily};
 pub use listing::RawListing;
-pub use status::{SourceStatus, StatusResponse, TickStats};
+pub use status::{SearchJob, SourceProgress, SourceStatus, StatusResponse, TickStats};
 pub use watch::{Watch, WatchRequest};

@@ -72,6 +72,12 @@ pub struct Deal {
     pub llm_verdict: Option<LlmVerdict>,
     /// Short model-written justification for the verdict.
     pub llm_reason: Option<String>,
+    /// Product category (guided-watch system), when the title matched one.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Spec values extracted per the category's spec definitions.
+    #[serde(default)]
+    pub specs: std::collections::HashMap<String, crate::category::SpecValue>,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
 }

@@ -39,6 +39,10 @@ pub struct Db {
 }
 
 impl Db {
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub async fn connect(path: &Path) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -64,13 +68,16 @@ impl Db {
             min_capacity_gb: req.min_capacity_gb,
             min_price_cents: req.min_price_cents,
             max_price_cents: req.max_price_cents,
+            category: req.category.clone(),
+            spec_filters: req.spec_filters.clone(),
+            queries: req.queries.clone(),
             active: req.active,
             created_at: Utc::now(),
         };
         sqlx::query(
             "INSERT INTO watches (id, name, family, model, min_capacity_gb, min_price_cents,
-             max_price_cents, active, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             max_price_cents, category, spec_filters, queries, active, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(watch.id.to_string())
         .bind(&watch.name)
@@ -79,6 +86,9 @@ impl Db {
         .bind(watch.min_capacity_gb)
         .bind(watch.min_price_cents)
         .bind(watch.max_price_cents)
+        .bind(&watch.category)
+        .bind(serde_json::to_string(&watch.spec_filters).expect("filters serialize"))
+        .bind(serde_json::to_string(&watch.queries).expect("queries serialize"))
         .bind(watch.active)
         .bind(watch.created_at.to_rfc3339())
         .execute(&self.pool)
@@ -96,7 +106,8 @@ impl Db {
     pub async fn update_watch(&self, id: Uuid, req: &WatchRequest) -> Result<Watch> {
         let result = sqlx::query(
             "UPDATE watches SET name = ?, family = ?, model = ?, min_capacity_gb = ?,
-             min_price_cents = ?, max_price_cents = ?, active = ? WHERE id = ?",
+             min_price_cents = ?, max_price_cents = ?, category = ?, spec_filters = ?,
+             queries = ?, active = ? WHERE id = ?",
         )
         .bind(&req.name)
         .bind(&req.family)
@@ -104,6 +115,9 @@ impl Db {
         .bind(req.min_capacity_gb)
         .bind(req.min_price_cents)
         .bind(req.max_price_cents)
+        .bind(&req.category)
+        .bind(serde_json::to_string(&req.spec_filters).expect("filters serialize"))
+        .bind(serde_json::to_string(&req.queries).expect("queries serialize"))
         .bind(req.active)
         .bind(id.to_string())
         .execute(&self.pool)
@@ -147,8 +161,8 @@ impl Db {
                 sqlx::query(
                     "INSERT INTO deals (id, source_id, canonical_url, title, price_cents, currency,
                      family, models, capacity_gb, condition, stuffing_score, flags, status,
-                     llm_verdict, llm_reason, first_seen, last_seen)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+                     llm_verdict, llm_reason, category, specs, first_seen, last_seen)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(deal.id.to_string())
                 .bind(&deal.source_id)
@@ -164,6 +178,8 @@ impl Db {
                 .bind(serde_json::to_string(&deal.flags).expect("serializing flags"))
                 .bind(deal.llm_verdict.map(verdict_to_str))
                 .bind(&deal.llm_reason)
+                .bind(&deal.category)
+                .bind(serde_json::to_string(&deal.specs).expect("specs serialize"))
                 .bind(deal.first_seen.to_rfc3339())
                 .bind(deal.last_seen.to_rfc3339())
                 .execute(&self.pool)
@@ -182,6 +198,7 @@ impl Db {
                      status = 'active',
                      llm_verdict = COALESCE(?, llm_verdict),
                      llm_reason = COALESCE(?, llm_reason),
+                     category = ?, specs = ?,
                      last_seen = ? WHERE id = ?",
                 )
                 .bind(&deal.title)
@@ -195,6 +212,8 @@ impl Db {
                 .bind(serde_json::to_string(&deal.flags).expect("serializing flags"))
                 .bind(deal.llm_verdict.map(verdict_to_str))
                 .bind(&deal.llm_reason)
+                .bind(&deal.category)
+                .bind(serde_json::to_string(&deal.specs).expect("specs serialize"))
                 .bind(deal.last_seen.to_rfc3339())
                 .bind(stored.id.to_string())
                 .execute(&self.pool)
@@ -432,7 +451,7 @@ fn parse_uuid(s: &str) -> Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| DbError::Corrupt(format!("bad uuid {s:?}: {e}")))
 }
 
-fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
+pub(crate) fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|t| t.with_timezone(&Utc))
         .map_err(|e| DbError::Corrupt(format!("bad timestamp {s:?}: {e}")))
@@ -447,6 +466,11 @@ fn row_to_watch(row: &sqlx::sqlite::SqliteRow) -> Result<Watch> {
         min_capacity_gb: row.get("min_capacity_gb"),
         min_price_cents: row.get("min_price_cents"),
         max_price_cents: row.get("max_price_cents"),
+        category: row.get("category"),
+        spec_filters: serde_json::from_str(&row.get::<String, _>("spec_filters"))
+            .map_err(|e| DbError::Corrupt(format!("bad spec_filters json: {e}")))?,
+        queries: serde_json::from_str(&row.get::<String, _>("queries"))
+            .map_err(|e| DbError::Corrupt(format!("bad queries json: {e}")))?,
         active: row.get("active"),
         created_at: parse_ts(&row.get::<String, _>("created_at"))?,
     })
@@ -482,6 +506,9 @@ fn row_to_deal(row: &sqlx::sqlite::SqliteRow) -> Result<Deal> {
         status,
         llm_verdict,
         llm_reason: row.get("llm_reason"),
+        category: row.get("category"),
+        specs: serde_json::from_str(&row.get::<String, _>("specs"))
+            .map_err(|e| DbError::Corrupt(format!("bad specs json: {e}")))?,
         first_seen: parse_ts(&row.get::<String, _>("first_seen"))?,
         last_seen: parse_ts(&row.get::<String, _>("last_seen"))?,
     })
@@ -514,6 +541,8 @@ mod tests {
             status: DealStatus::Active,
             llm_verdict: None,
             llm_reason: None,
+            category: None,
+            specs: Default::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         }
@@ -529,6 +558,9 @@ mod tests {
             min_capacity_gb: None,
             min_price_cents: Some(10_000),
             max_price_cents: Some(50_000),
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
             active: true,
         };
         let created = db.create_watch(&req).await.unwrap();
@@ -661,7 +693,10 @@ mod tests {
                 min_capacity_gb: None,
                 min_price_cents: None,
                 max_price_cents: None,
-                active: true,
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
+            active: true,
             })
             .await
             .unwrap();
@@ -695,7 +730,10 @@ mod tests {
                 min_capacity_gb: None,
                 min_price_cents: None,
                 max_price_cents: None,
-                active: true,
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
+            active: true,
             })
             .await
             .unwrap();

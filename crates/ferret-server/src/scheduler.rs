@@ -126,6 +126,7 @@ async fn run_source(
                     listings,
                     notifier.as_ref(),
                     refiner.as_deref(),
+                    true,
                 )
                 .await
                 {

@@ -50,3 +50,19 @@ pub struct StatusResponse {
     /// Current match count per watch id.
     pub watch_matches: HashMap<Uuid, i64>,
 }
+
+/// Per-source progress of an ad-hoc guided-creation search.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum SourceProgress {
+    Pending,
+    Done { listings: u64 },
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchJob {
+    pub id: Uuid,
+    pub sources: HashMap<String, SourceProgress>,
+    pub done: bool,
+}

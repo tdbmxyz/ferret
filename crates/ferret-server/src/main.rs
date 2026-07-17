@@ -1,12 +1,16 @@
 mod api;
 mod config;
 mod db;
+mod db_category;
+mod interpret;
 mod llm;
 mod notify;
 mod pipeline;
 mod politeness;
 mod scheduler;
+mod seeds;
 mod scrape;
+mod search;
 mod state;
 mod watches;
 
@@ -47,14 +51,27 @@ async fn main() -> anyhow::Result<()> {
         None => Arc::new(NoopNotifier),
     };
 
-    let refiner: Option<Arc<dyn llm::LlmRefiner>> = llm::OpenAiRefiner::new(&config.llm)
+    let llm_client = llm::OpenAiRefiner::new(&config.llm)
         .context("configuring llm refiner")?
-        .map(|r| {
-            tracing::info!(base_url = config.llm.base_url, "llm refinement enabled");
-            Arc::new(r) as Arc<dyn llm::LlmRefiner>
-        });
+        .map(Arc::new);
+    if llm_client.is_some() {
+        tracing::info!(base_url = config.llm.base_url, "llm refinement enabled");
+    }
+    let refiner: Option<Arc<dyn llm::LlmRefiner>> =
+        llm_client.clone().map(|r| r as Arc<dyn llm::LlmRefiner>);
+    let interpreter: Option<Arc<dyn llm::LlmInterpret>> =
+        llm_client.map(|r| r as Arc<dyn llm::LlmInterpret>);
 
     let families = Arc::new(config.families.clone());
+
+    // live watch queries feeding the query-driven sources
+    let shared_queries: state::SharedQueries = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    state::refresh_watch_queries(&db, &shared_queries)
+        .await
+        .context("loading watch queries")?;
+    db.seed_categories(&seeds::builtin(&families))
+        .await
+        .context("seeding categories")?;
 
     let mut sources: Vec<(Arc<dyn DealSource>, Duration)> = config
         .sources
@@ -64,15 +81,16 @@ async fn main() -> anyhow::Result<()> {
                 Duration::from_millis(sc.delay_ms),
                 sc.max_concurrency,
             );
-            let source: Arc<dyn DealSource> = Arc::new(GenericSource::new(sc.clone(), client));
+            let source: Arc<dyn DealSource> = Arc::new(GenericSource::new(sc.clone(), client, Some(shared_queries.clone())));
             (source, Duration::from_secs(sc.interval_minutes * 60))
         })
         .collect();
-    if config.leboncoin.enabled && !config.leboncoin.queries.is_empty() {
+    // enabled is enough — watch-driven queries can arrive at runtime
+    if config.leboncoin.enabled {
         let lbc = &config.leboncoin;
         let client = politeness::scrape_client(Duration::from_millis(lbc.delay_ms), 1);
         sources.push((
-            Arc::new(scrape::leboncoin::LeboncoinSource::new(lbc.clone(), client)),
+            Arc::new(scrape::leboncoin::LeboncoinSource::new(lbc.clone(), client, Some(shared_queries.clone()))),
             Duration::from_secs(lbc.interval_minutes * 60),
         ));
     }
@@ -83,11 +101,11 @@ async fn main() -> anyhow::Result<()> {
             Duration::from_secs(shop.interval_minutes * 60),
         ));
     }
-    if config.ebay.enabled && !config.ebay.queries.is_empty() {
+    if config.ebay.enabled {
         let ebay = &config.ebay;
         let client = politeness::scrape_client(Duration::from_millis(ebay.delay_ms), 1);
         sources.push((
-            Arc::new(scrape::ebay::EbaySource::new(ebay.clone(), client)),
+            Arc::new(scrape::ebay::EbaySource::new(ebay.clone(), client, Some(shared_queries.clone()))),
             Duration::from_secs(ebay.interval_minutes * 60),
         ));
     }
@@ -103,11 +121,20 @@ async fn main() -> anyhow::Result<()> {
         statuses.clone(),
     );
 
+    let search_context = Arc::new(search::SearchContext {
+        config: config.clone(),
+        families: families.clone(),
+        scrape: config.scrape.clone(),
+    });
     let mut app = api::router(state::AppState {
         db,
         families,
         notifier: notifier_api,
         statuses: statuses.clone(),
+        interpreter,
+        search: search_context,
+        jobs: Arc::new(tokio::sync::RwLock::new(Default::default())),
+        shared_queries,
     })
         // The Tauri webview is a foreign origin and the trust model is
         // LAN/tailnet single-user with no cookies — permissive CORS is fine.
