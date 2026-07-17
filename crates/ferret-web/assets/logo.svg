@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- A: "Bandit" — geometric ferret head, mask band across the eyes.
+       Ferrets wear a burglar mask; so do bargain hunters. -->
+  <rect width="128" height="128" rx="28" fill="#14161c"/>
+  <!-- ears -->
+  <circle cx="38" cy="34" r="13" fill="#e8e2d4"/>
+  <circle cx="90" cy="34" r="13" fill="#e8e2d4"/>
+  <circle cx="38" cy="34" r="6" fill="#b9a88f"/>
+  <circle cx="90" cy="34" r="6" fill="#b9a88f"/>
+  <!-- head: rounded wedge -->
+  <path d="M64 26 C92 26 106 44 106 62 C106 88 88 106 64 106 C40 106 22 88 22 62 C22 44 36 26 64 26 Z" fill="#e8e2d4"/>
+  <!-- mask band -->
+  <path d="M22 54 C40 46 88 46 106 54 L106 70 C88 78 40 78 22 70 Z" fill="#2a2e3a"/>
+  <!-- eyes on the mask -->
+  <circle cx="45" cy="62" r="7" fill="#7c9aff"/>
+  <circle cx="83" cy="62" r="7" fill="#7c9aff"/>
+  <circle cx="47" cy="60" r="2.4" fill="#e8e2d4"/>
+  <circle cx="85" cy="60" r="2.4" fill="#e8e2d4"/>
+  <!-- muzzle -->
+  <ellipse cx="64" cy="88" rx="16" ry="12" fill="#f6f1e6"/>
+  <path d="M64 82 l6 5 c0 5 -12 5 -12 0 Z" fill="#2a2e3a"/>
+</svg>
