@@ -1,0 +1,23 @@
+{
+  "products": [
+    {
+      "id": 810001,
+      "title": "IronWolf NAS HDD",
+      "handle": "ironwolf-nas-hdd",
+      "published_at": "2026-05-01T00:00:00+02:00",
+      "variants": [
+        { "id": 91001, "title": "4TB", "price": "119.90", "available": true },
+        { "id": 91002, "title": "8TB", "price": "219.90", "available": false }
+      ]
+    },
+    {
+      "id": 810002,
+      "title": "MiniPC AI-X1",
+      "handle": "minipc-ai-x1",
+      "variants": [
+        { "id": 91003, "title": "Default Title", "price": "899.00", "available": true },
+        { "id": 91004, "title": "64GB", "price": "not-a-price", "available": true }
+      ]
+    }
+  ]
+}

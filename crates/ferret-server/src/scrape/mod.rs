@@ -2,8 +2,10 @@
 //! declarative engine (config-driven, static HTML) and — later —
 //! hand-written plugins for JS-heavy/authenticated sources.
 
+pub mod ebay;
 pub mod generic;
 pub mod leboncoin;
+pub mod shopify;
 
 use ferret_domain::RawListing;
 
