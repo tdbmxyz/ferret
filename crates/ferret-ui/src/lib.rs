@@ -2,7 +2,9 @@
 //! (trunk) and rendered inside the Tauri webview. Anything platform-specific
 //! (where the API lives) is injected from the outside via [`AppConfig`].
 
+mod categories;
 mod deals;
+mod guided;
 mod sparkline;
 mod status;
 mod watches;
@@ -22,6 +24,7 @@ pub struct AppConfig {
 enum Tab {
     Deals,
     Watches,
+    Categories,
 }
 
 /// Bumped after every mutation (watch created/updated/deleted) so list
@@ -46,6 +49,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
         on_cleanup(move || handle.clear());
     }
     status::provide_status(status_tick);
+    provide_context(guided::EditRequest(RwSignal::new(None)));
     let tab = RwSignal::new(Tab::Deals);
     let show_connect = RwSignal::new(false);
     let server = RwSignal::new(config.api_base.to_string());
@@ -82,6 +86,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
             <nav>
                 {tab_button(Tab::Deals, "Deals")}
                 {tab_button(Tab::Watches, "Watches")}
+                {tab_button(Tab::Categories, "Categories")}
             </nav>
             <button class="connect-toggle" title="server address"
                 on:click=move |_| show_connect.update(|s| *s = !*s)>
@@ -103,6 +108,9 @@ pub fn App(config: AppConfig) -> impl IntoView {
             </div>
             <div style:display=move || if tab.get() == Tab::Watches { "" } else { "none" }>
                 <watches::WatchesView/>
+            </div>
+            <div style:display=move || if tab.get() == Tab::Categories { "" } else { "none" }>
+                <categories::CategoriesView/>
             </div>
         </main>
     }

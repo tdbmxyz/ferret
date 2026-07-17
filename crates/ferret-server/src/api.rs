@@ -22,6 +22,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/deals", get(list_deals))
         .route("/api/deals/{id}/prices", get(deal_prices))
         .route("/api/families", get(list_families))
+        .route("/api/categories", get(list_categories).post(upsert_category))
+        .route("/api/categories/{slug}", axum::routing::delete(delete_category))
+        .route("/api/interpret", axum::routing::post(interpret_text))
+        .route("/api/searches", axum::routing::post(start_search))
+        .route("/api/searches/{id}", get(search_progress))
         .with_state(state)
 }
 
@@ -76,6 +81,7 @@ async fn create_watch(
         // feedback is best-effort; the watch itself is saved
         tracing::warn!(error = %e, "retro-match after create failed");
     }
+    let _ = crate::state::refresh_watch_queries(&state.db, &state.shared_queries).await;
     Ok((StatusCode::CREATED, Json(watch)).into_response())
 }
 
@@ -90,6 +96,7 @@ async fn update_watch(
     {
         tracing::warn!(error = %e, "retro-match after update failed");
     }
+    let _ = crate::state::refresh_watch_queries(&state.db, &state.shared_queries).await;
     Ok(Json(watch).into_response())
 }
 
@@ -98,6 +105,7 @@ async fn delete_watch(
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     state.db.delete_watch(id).await?;
+    let _ = crate::state::refresh_watch_queries(&state.db, &state.shared_queries).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -124,6 +132,80 @@ async fn list_families(State(state): State<AppState>) -> Response {
     Json(state.families.as_ref().clone()).into_response()
 }
 
+// ---- guided watch creation ----
+
+async fn list_categories(State(state): State<AppState>) -> Result<Response, ApiError> {
+    Ok(Json(state.db.list_categories().await?).into_response())
+}
+
+/// Create/replace a category — also how an LLM proposal gets approved
+/// (the UI posts it back with status="active", possibly edited).
+async fn upsert_category(
+    State(state): State<AppState>,
+    Json(category): Json<ferret_domain::Category>,
+) -> Result<Response, ApiError> {
+    state.db.upsert_category(&category).await?;
+    Ok((StatusCode::CREATED, Json(category)).into_response())
+}
+
+async fn delete_category(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Response, ApiError> {
+    state.db.delete_category(&slug).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct InterpretRequest {
+    text: String,
+}
+
+async fn interpret_text(
+    State(state): State<AppState>,
+    Json(req): Json<InterpretRequest>,
+) -> Result<Response, ApiError> {
+    let categories = state.db.list_categories().await?;
+    let out = crate::interpret::interpret(
+        &req.text,
+        &categories,
+        state.interpreter.as_deref(),
+    )
+    .await;
+    Ok(Json(out).into_response())
+}
+
+#[derive(Deserialize)]
+struct SearchRequest {
+    queries: Vec<String>,
+}
+
+async fn start_search(
+    State(state): State<AppState>,
+    Json(req): Json<SearchRequest>,
+) -> Result<Response, ApiError> {
+    let sources = crate::search::one_shot_sources(&state.search, &req.queries);
+    let id = crate::search::spawn_job(
+        state.db.clone(),
+        &state.search,
+        state.notifier.clone(),
+        state.jobs.clone(),
+        sources,
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "id": id })).into_response())
+}
+
+async fn search_progress(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    match state.jobs.read().await.get(&id) {
+        Some(job) => Ok(Json(job.clone()).into_response()),
+        None => Err(ApiError(DbError::NotFound)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +227,14 @@ mod tests {
             families: Arc::new(Vec::new()),
             notifier: Arc::new(crate::notify::NoopNotifier),
             statuses: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            interpreter: None,
+            search: Arc::new(crate::search::SearchContext {
+                config: crate::config::Config::default(),
+                families: Arc::new(vec![]),
+                scrape: Default::default(),
+            }),
+            jobs: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            shared_queries: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         })
     }
 
@@ -220,6 +310,8 @@ mod tests {
             status: ferret_domain::DealStatus::Active,
             llm_verdict: None,
             llm_reason: None,
+            category: None,
+            specs: Default::default(),
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
         };
@@ -229,6 +321,14 @@ mod tests {
             families: Arc::new(Vec::new()),
             notifier: Arc::new(crate::notify::NoopNotifier),
             statuses: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            interpreter: None,
+            search: Arc::new(crate::search::SearchContext {
+                config: crate::config::Config::default(),
+                families: Arc::new(vec![]),
+                scrape: Default::default(),
+            }),
+            jobs: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            shared_queries: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         });
 
         let resp = app

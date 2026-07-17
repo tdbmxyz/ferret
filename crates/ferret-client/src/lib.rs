@@ -7,8 +7,10 @@
 use std::time::Duration;
 
 use ferret_domain::{
-    Deal, HealthResponse, PricePoint, ProductFamily, StatusResponse, Watch, WatchRequest,
+    Category, Deal, HealthResponse, Interpretation, PricePoint, ProductFamily, SearchJob,
+    StatusResponse, Watch, WatchRequest,
 };
+use serde::Serialize;
 use url::Url;
 use uuid::Uuid;
 
@@ -144,5 +146,73 @@ impl FerretClient {
 
     pub async fn families(&self) -> Result<Vec<ProductFamily>> {
         self.get("api/families").await
+    }
+
+    // ---- guided watch creation ----
+
+    pub async fn categories(&self) -> Result<Vec<Category>> {
+        self.get("api/categories").await
+    }
+
+    /// Create/replace a category — also approves an LLM proposal when
+    /// posted back with status "active".
+    pub async fn upsert_category(&self, category: &Category) -> Result<Category> {
+        self.send(self.http.post(self.url("api/categories")?).json(category), DATA_TIMEOUT)
+            .await
+    }
+
+    pub async fn delete_category(&self, slug: &str) -> Result<()> {
+        let request = self.http.delete(self.url(&format!("api/categories/{slug}"))?);
+        let mut request = request.build().map_err(|e| ClientError::Transport(e.to_string()))?;
+        *request.timeout_mut() = Some(DATA_TIMEOUT);
+        let response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response.text().await.unwrap_or_default();
+            return Err(ClientError::Api { status, message });
+        }
+        Ok(())
+    }
+
+    /// What product is this text about? Instant for known categories, may
+    /// take LLM latency otherwise.
+    pub async fn interpret(&self, text: &str) -> Result<Interpretation> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            text: &'a str,
+        }
+        self.send(
+            self.http.post(self.url("api/interpret")?).json(&Body { text }),
+            // interpret may sit on an LLM call — give it more room
+            Duration::from_secs(60),
+        )
+        .await
+    }
+
+    /// Kick off a background ad-hoc search; poll `search_progress`.
+    pub async fn start_search(&self, queries: &[String]) -> Result<Uuid> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            queries: &'a [String],
+        }
+        #[derive(serde::Deserialize)]
+        struct Created {
+            id: Uuid,
+        }
+        let created: Created = self
+            .send(
+                self.http.post(self.url("api/searches")?).json(&Body { queries }),
+                DATA_TIMEOUT,
+            )
+            .await?;
+        Ok(created.id)
+    }
+
+    pub async fn search_progress(&self, id: Uuid) -> Result<SearchJob> {
+        self.get(&format!("api/searches/{id}")).await
     }
 }

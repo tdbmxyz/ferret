@@ -21,6 +21,15 @@ pub struct Watch {
     /// prices that title-match the product (veille-prix pattern).
     pub min_price_cents: Option<i64>,
     pub max_price_cents: Option<i64>,
+    /// Category the watch targets (guided creation); when set, only deals
+    /// categorized the same can match, and `spec_filters` apply.
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub spec_filters: Vec<crate::category::SpecFilter>,
+    /// Search queries this watch feeds into the scheduled scrape rotation.
+    #[serde(default)]
+    pub queries: Vec<String>,
     pub active: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -38,6 +47,12 @@ pub struct WatchRequest {
     pub min_price_cents: Option<i64>,
     #[serde(default)]
     pub max_price_cents: Option<i64>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub spec_filters: Vec<crate::category::SpecFilter>,
+    #[serde(default)]
+    pub queries: Vec<String>,
     #[serde(default = "default_true")]
     pub active: bool,
 }
@@ -94,6 +109,9 @@ mod tests {
             min_capacity_gb: None,
             min_price_cents: None,
             max_price_cents: Some(50_000),
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
             active: true,
             created_at: DateTime::UNIX_EPOCH,
         };

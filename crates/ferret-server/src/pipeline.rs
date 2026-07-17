@@ -12,8 +12,8 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use ferret_domain::{
-    Deal, DealStatus, Flag, ProductFamily, RawListing, attributes, family, matching, normalize,
-    price, refine,
+    Deal, DealStatus, Flag, ProductFamily, RawListing, attributes, category, family, matching,
+    normalize, price, refine,
 };
 use uuid::Uuid;
 
@@ -37,11 +37,13 @@ pub struct PipelineStats {
     pub refined: u64,
 }
 
-/// Process one source's full fetch from a single scheduler tick.
+/// Process one source's fetch.
 ///
-/// `source_id` scopes the disappearance pass: deals of that source absent
-/// from `listings` are marked gone. Callers must only pass the result of a
-/// SUCCESSFUL fetch — the scheduler never calls this on error.
+/// `run_lifecycle` must be true ONLY for a scheduler tick's full fetch: it
+/// scopes the disappearance pass (deals of `source_id` absent from
+/// `listings` go gone). Ad-hoc guided-creation searches are PARTIAL fetches
+/// and pass false — they must never make unrelated deals "disappear".
+#[allow(clippy::too_many_arguments)]
 pub async fn process_listings(
     db: &Db,
     families: &[ProductFamily],
@@ -50,9 +52,11 @@ pub async fn process_listings(
     listings: Vec<RawListing>,
     notifier: &dyn Notify,
     refiner: Option<&dyn LlmRefiner>,
+    run_lifecycle: bool,
 ) -> anyhow::Result<PipelineStats> {
     let mut stats = PipelineStats::default();
     let watches = db.list_watches().await?;
+    let categories = db.list_categories().await?;
     let mut seen_urls: HashSet<String> = HashSet::new();
 
     for raw in listings {
@@ -73,6 +77,10 @@ pub async fn process_listings(
         // -- extract + score --
         let attrs = attributes::extract(&title);
         let fam = family::match_families(&title, families);
+        let (deal_category, deal_specs) = match category::categorize(&title, &categories) {
+            Some(cat) => (Some(cat.slug.clone()), category::extract_specs(&title, cat)),
+            None => (None, Default::default()),
+        };
 
         let mut flags = Vec::new();
         if fam.models.len() >= 2 && fam.stuffing_score >= scrape.stuffing_threshold {
@@ -103,6 +111,8 @@ pub async fn process_listings(
             status: DealStatus::Active,
             llm_verdict: None,
             llm_reason: None,
+            category: deal_category,
+            specs: deal_specs,
             first_seen: now,
             last_seen: now,
         };
@@ -209,7 +219,9 @@ pub async fn process_listings(
     }
 
     // -- lifecycle: deals of this source the tick no longer sees --
-    stats.gone = db.mark_gone(source_id, &seen_urls).await?;
+    if run_lifecycle {
+        stats.gone = db.mark_gone(source_id, &seen_urls).await?;
+    }
 
     Ok(stats)
 }
@@ -309,6 +321,7 @@ mod tests {
             listings,
             notifier,
             refiner,
+            true,
         )
         .await
         .unwrap()
@@ -323,6 +336,9 @@ mod tests {
             min_capacity_gb: None,
             min_price_cents: None,
             max_price_cents: Some(50_000),
+            category: None,
+            spec_filters: vec![],
+            queries: vec![],
             active: true,
         })
         .await
@@ -551,6 +567,28 @@ mod tests {
         // stored verdict survives the re-scrape
         let deals = db.list_deals(None).await.unwrap();
         assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::StuffedTitle));
+    }
+
+    #[tokio::test]
+    async fn deals_get_categorized_with_spec_values() {
+        let (db, notifier) = setup().await;
+        db.seed_categories(&crate::seeds::builtin(&[])).await.unwrap();
+        run(
+            &db,
+            vec![listing("Seagate IronWolf 4TB NAS 7200rpm", "90 €", "https://ex.com/hdd")],
+            &notifier,
+        )
+        .await;
+        let deals = db.list_deals(None).await.unwrap();
+        assert_eq!(deals[0].category.as_deref(), Some("hdd"));
+        assert_eq!(
+            deals[0].specs.get("capacity"),
+            Some(&ferret_domain::SpecValue::Number(4000.0))
+        );
+        assert_eq!(
+            deals[0].specs.get("rpm"),
+            Some(&ferret_domain::SpecValue::Number(7200.0))
+        );
     }
 
     #[tokio::test]

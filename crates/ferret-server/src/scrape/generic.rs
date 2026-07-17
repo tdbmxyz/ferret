@@ -86,11 +86,17 @@ pub fn parse_listings(html: &str, config: &SourceConfig, base: &Url) -> Vec<RawL
 pub struct GenericSource {
     config: SourceConfig,
     client: ScrapeClient,
+    /// live watch queries merged in at fetch time (query-template sources)
+    extra: Option<crate::state::SharedQueries>,
 }
 
 impl GenericSource {
-    pub fn new(config: SourceConfig, client: ScrapeClient) -> Self {
-        Self { config, client }
+    pub fn new(
+        config: SourceConfig,
+        client: ScrapeClient,
+        extra: Option<crate::state::SharedQueries>,
+    ) -> Self {
+        Self { config, client, extra }
     }
 }
 
@@ -101,11 +107,22 @@ impl DealSource for GenericSource {
     }
 
     async fn fetch(&self) -> anyhow::Result<Vec<RawListing>> {
-        // fixed-page source = one pass with no query
-        let queries: Vec<Option<&str>> = if self.config.queries.is_empty() {
+        // fixed-page source = one pass with no query; query templates also
+        // pick up live watch queries
+        let mut query_list = self.config.queries.clone();
+        if self.config.url.contains("{query}")
+            && let Some(extra) = &self.extra
+        {
+            for q in extra.read().await.iter() {
+                if !query_list.contains(q) {
+                    query_list.push(q.clone());
+                }
+            }
+        }
+        let queries: Vec<Option<&str>> = if query_list.is_empty() {
             vec![None]
         } else {
-            self.config.queries.iter().map(|q| Some(q.as_str())).collect()
+            query_list.iter().map(|q| Some(q.as_str())).collect()
         };
         let mut all = Vec::new();
         // the same listing can surface for several queries — dedupe by URL
