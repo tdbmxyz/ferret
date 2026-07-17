@@ -75,6 +75,21 @@ async fn main() -> anyhow::Result<()> {
             Duration::from_secs(lbc.interval_minutes * 60),
         ));
     }
+    for shop in &config.shopify {
+        let client = politeness::scrape_client(Duration::from_millis(shop.delay_ms), 1);
+        sources.push((
+            Arc::new(scrape::shopify::ShopifySource::new(shop.clone(), client)),
+            Duration::from_secs(shop.interval_minutes * 60),
+        ));
+    }
+    if config.ebay.enabled && !config.ebay.queries.is_empty() {
+        let ebay = &config.ebay;
+        let client = politeness::scrape_client(Duration::from_millis(ebay.delay_ms), 1);
+        sources.push((
+            Arc::new(scrape::ebay::EbaySource::new(ebay.clone(), client)),
+            Duration::from_secs(ebay.interval_minutes * 60),
+        ));
+    }
     scheduler::spawn_all(
         sources,
         db.clone(),

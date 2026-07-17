@@ -32,6 +32,10 @@ pub struct Config {
     pub llm: LlmConfig,
     /// Hand-written Leboncoin plugin (occasion, France).
     pub leboncoin: LeboncoinConfig,
+    /// Shopify official-store catalogs (the "new" market), one per store.
+    pub shopify: Vec<ShopifyConfig>,
+    /// Hand-written eBay.fr plugin (new + occasion).
+    pub ebay: EbayConfig,
 }
 
 impl Default for Config {
@@ -46,6 +50,67 @@ impl Default for Config {
             notifications: NotificationsConfig::default(),
             llm: LlmConfig::default(),
             leboncoin: LeboncoinConfig::default(),
+            shopify: Vec::new(),
+            ebay: EbayConfig::default(),
+        }
+    }
+}
+
+/// One Shopify store (`[[shopify]]`): its public `/products.json` catalog
+/// is fetched page by page — structured JSON, no anti-bot, no selectors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShopifyConfig {
+    /// Stable id, e.g. "minisforum-eu".
+    pub id: String,
+    /// Store base URL, e.g. `https://store.minisforum.de`.
+    pub url: String,
+    /// Currency of the store's price strings.
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    /// Catalogs move slowly — default 6 h.
+    #[serde(default = "default_shopify_interval")]
+    pub interval_minutes: u64,
+    #[serde(default = "default_shopify_delay")]
+    pub delay_ms: u64,
+}
+
+fn default_currency() -> String {
+    "EUR".into()
+}
+fn default_shopify_interval() -> u64 {
+    360
+}
+fn default_shopify_delay() -> u64 {
+    1000
+}
+
+/// eBay.fr plugin. eBay rate-limits the IP after ~10 rapid requests
+/// (observed by veille-prix): keep the delay large — the source only runs
+/// every tick anyway.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EbayConfig {
+    pub enabled: bool,
+    /// Search queries, e.g. ["rtx 3080"]. One result page per query.
+    pub queries: Vec<String>,
+    pub delay_ms: u64,
+    pub interval_minutes: u64,
+    /// External fetcher for anti-bot sources: argv whose `{url}` element is
+    /// replaced by the page URL; must print the HTML on stdout. eBay
+    /// fingerprint-blocks both plain HTTP clients and curl — a stealth
+    /// browser wrapper (e.g. scripts/stealth-fetch.py, Scrapling) goes
+    /// here. Empty = plain HTTP (works only where eBay doesn't block).
+    pub fetch_command: Vec<String>,
+}
+
+impl Default for EbayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            queries: Vec::new(),
+            delay_ms: 30_000,
+            interval_minutes: 60,
+            fetch_command: Vec::new(),
         }
     }
 }
