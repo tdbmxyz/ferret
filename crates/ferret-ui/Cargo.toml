@@ -10,4 +10,4 @@ ferret-client.workspace = true
 leptos.workspace = true
 url.workspace = true
 uuid.workspace = true
-web-sys = { workspace = true, features = ["Window", "Storage"] }
+web-sys = { workspace = true, features = ["Window", "Storage", "Location"] }

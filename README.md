@@ -69,3 +69,14 @@ services.ferret = {
 
 The module serves the built web frontend from the server and stores state
 under `/var/lib/ferret`.
+
+## Android
+
+`just apk` builds the debug APK; `just release-apk` builds the signed
+release APK (release signing reads
+`crates/ferret-desktop/gen/android/keystore.properties`, gitignored —
+see `keystore.properties.sample`; the keystore itself lives in
+`~/.config/ferret/`). On first launch the app talks to
+`http://127.0.0.1:4800` — point it at zeus by writing the server URL to
+`localStorage["ferret-api-base"]` (a connect screen is future work) or by
+setting `FERRET_SERVER` for the desktop shell.

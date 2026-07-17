@@ -140,3 +140,17 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
 .watch { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
 .watch-main { flex-direction: column; align-items: flex-start; gap: 0.1rem; }
 .watch-actions { display: flex; gap: 0.4rem; }
+
+.connect-toggle { margin-left: auto; }
+
+.connect {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.connect input { min-width: 16rem; }
