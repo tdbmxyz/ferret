@@ -17,6 +17,26 @@ pub struct LlmSettings {
     pub from_override: bool,
 }
 
+/// Body of `POST /api/settings/llm/models` and `/test`: probe an endpoint
+/// with the values currently typed in the form. Missing fields fall back
+/// to the server's effective settings (including the stored API key).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmProbeRequest {
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// Answer of `POST /api/settings/llm/test`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmProbeResult {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
 /// `PUT /api/settings/llm` body — replaces the whole override.
 /// `api_key: None` keeps the stored key; `Some("")` clears it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

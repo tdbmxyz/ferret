@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use ferret_domain::{
-    Category, Deal, HealthResponse, Interpretation, LlmSettings, LlmSettingsUpdate, PricePoint,
-    ProductFamily, SearchJob, StatusResponse, Watch, WatchRequest,
+    Category, Deal, HealthResponse, Interpretation, LlmProbeRequest, LlmProbeResult, LlmSettings,
+    LlmSettingsUpdate, PricePoint, ProductFamily, SearchJob, StatusResponse, Watch, WatchRequest,
 };
 use serde::Serialize;
 use url::Url;
@@ -210,6 +210,24 @@ impl FerretClient {
     pub async fn reset_llm_settings(&self) -> Result<LlmSettings> {
         self.send(self.http.delete(self.url("api/settings/llm")?), DATA_TIMEOUT)
             .await
+    }
+
+    /// Ask the endpoint (typed or stored values) for its model catalog.
+    pub async fn llm_models(&self, probe: &LlmProbeRequest) -> Result<Vec<String>> {
+        self.send(
+            self.http.post(self.url("api/settings/llm/models")?).json(probe),
+            Duration::from_secs(15),
+        )
+        .await
+    }
+
+    /// One real completion round-trip — is this endpoint/model usable?
+    pub async fn test_llm(&self, probe: &LlmProbeRequest) -> Result<LlmProbeResult> {
+        self.send(
+            self.http.post(self.url("api/settings/llm/test")?).json(probe),
+            Duration::from_secs(20),
+        )
+        .await
     }
 
     /// Kick off a background ad-hoc search; poll `search_progress`.

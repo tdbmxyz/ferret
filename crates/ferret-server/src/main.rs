@@ -13,6 +13,7 @@ mod scrape;
 mod search;
 mod state;
 mod watches;
+mod websearch;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -48,12 +48,19 @@ fn queries_for(text: &str, category: Option<&Category>) -> Vec<String> {
 }
 
 /// The full interpretation ladder. `interpreter` is None when the LLM pass
-/// is disabled.
-pub async fn interpret(
+/// is disabled. `web_search` fetches context snippets for the LLM step —
+/// injected so tests never touch the network; only called when the
+/// heuristic missed and an LLM will actually look at the result.
+pub async fn interpret<F, Fut>(
     text: &str,
     categories: &[Category],
     interpreter: Option<&dyn LlmInterpret>,
-) -> Interpretation {
+    web_search: F,
+) -> Interpretation
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Vec<String>>,
+{
     let llm_active = interpreter.is_some();
     // 1. instant heuristic
     if let Some((cat, constraints)) = category::interpret_heuristic(text, categories) {
@@ -64,13 +71,19 @@ pub async fn interpret(
             proposal: None,
             via: "heuristic".into(),
             llm_active,
+            llm_error: None,
         };
     }
-    // 2. LLM mapping / proposal (fail-open)
+    // 2. LLM mapping / proposal (fail-open, but the error is surfaced)
+    let mut llm_error = None;
     if let Some(llm) = interpreter {
-        match llm.interpret(text, categories).await {
+        let context = web_search(text.to_string()).await;
+        match llm.interpret(text, categories, &context).await {
             Ok(answer) => return from_llm(text, categories, answer),
-            Err(e) => tracing::warn!(error = %e, "llm interpret failed — falling through"),
+            Err(e) => {
+                tracing::warn!(error = %e, "llm interpret failed — falling through");
+                llm_error = Some(e.to_string());
+            }
         }
     }
     // 3. nothing — the UI offers manual creation / cancel
@@ -81,6 +94,7 @@ pub async fn interpret(
         proposal: None,
         via: "none".into(),
         llm_active,
+        llm_error,
     }
 }
 
@@ -114,6 +128,7 @@ fn from_llm(text: &str, categories: &[Category], answer: LlmInterpretation) -> I
         constraints,
         proposal,
         llm_active: true,
+        llm_error: None,
     }
 }
 
@@ -141,7 +156,17 @@ mod tests {
         }
     }
 
-    struct MockLlm(anyhow::Result<LlmInterpretation>);
+    #[derive(Default)]
+    struct MockLlm {
+        answer: Option<anyhow::Result<LlmInterpretation>>,
+        seen_context: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MockLlm {
+        fn new(answer: anyhow::Result<LlmInterpretation>) -> Self {
+            Self { answer: Some(answer), seen_context: Default::default() }
+        }
+    }
 
     #[async_trait::async_trait]
     impl LlmInterpret for MockLlm {
@@ -149,17 +174,23 @@ mod tests {
             &self,
             _text: &str,
             _categories: &[Category],
+            web_context: &[String],
         ) -> anyhow::Result<LlmInterpretation> {
-            match &self.0 {
+            *self.seen_context.lock().unwrap() = web_context.to_vec();
+            match self.answer.as_ref().unwrap() {
                 Ok(v) => Ok(v.clone()),
                 Err(e) => Err(anyhow::anyhow!("{e}")),
             }
         }
     }
 
+    async fn no_web(_q: String) -> Vec<String> {
+        Vec::new()
+    }
+
     #[tokio::test]
     async fn heuristic_answers_without_llm() {
-        let out = interpret("4to disque dur", &[hdd()], None).await;
+        let out = interpret("4to disque dur", &[hdd()], None, no_web).await;
         assert_eq!(out.via, "heuristic");
         assert_eq!(out.category.as_ref().unwrap().slug, "hdd");
         assert_eq!(
@@ -171,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn llm_maps_unknown_phrasing_to_known_category() {
-        let llm = MockLlm(Ok(LlmInterpretation {
+        let llm = MockLlm::new(Ok(LlmInterpretation {
             category_slug: Some("hdd".into()),
             constraints: vec![LlmConstraint {
                 op: "min".into(),
@@ -180,7 +211,7 @@ mod tests {
             }],
             proposal: None,
         }));
-        let out = interpret("spinning rust for my nas box", &[hdd()], Some(&llm)).await;
+        let out = interpret("spinning rust for my nas box", &[hdd()], Some(&llm), no_web).await;
         assert_eq!(out.via, "llm");
         assert_eq!(out.category.as_ref().unwrap().slug, "hdd");
         assert_eq!(
@@ -191,7 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn llm_drafts_proposal_for_unknown_product() {
-        let llm = MockLlm(Ok(LlmInterpretation {
+        let llm = MockLlm::new(Ok(LlmInterpretation {
             category_slug: None,
             constraints: vec![],
             proposal: Some(crate::llm::LlmProposal {
@@ -207,7 +238,7 @@ mod tests {
                 }],
             }),
         }));
-        let out = interpret("machine à café DeLonghi", &[hdd()], Some(&llm)).await;
+        let out = interpret("machine à café DeLonghi", &[hdd()], Some(&llm), no_web).await;
         assert_eq!(out.via, "llm");
         assert!(out.category.is_none());
         let proposal = out.proposal.unwrap();
@@ -218,10 +249,42 @@ mod tests {
 
     #[tokio::test]
     async fn llm_failure_is_fail_open_to_none() {
-        let llm = MockLlm(Err(anyhow::anyhow!("backend down")));
-        let out = interpret("machine à café", &[hdd()], Some(&llm)).await;
+        let llm = MockLlm::new(Err(anyhow::anyhow!("backend down")));
+        let out = interpret("machine à café", &[hdd()], Some(&llm), no_web).await;
         assert_eq!(out.via, "none");
         assert!(out.category.is_none() && out.proposal.is_none());
         assert_eq!(out.queries, vec!["machine à café".to_string()]);
+        assert_eq!(out.llm_error.as_deref(), Some("backend down"), "error is surfaced");
+    }
+
+    #[tokio::test]
+    async fn web_context_reaches_the_llm_but_not_the_heuristic_path() {
+        let llm = MockLlm::new(Ok(LlmInterpretation {
+            category_slug: Some("hdd".into()),
+            constraints: vec![],
+            proposal: None,
+        }));
+        let searched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = searched.clone();
+        let web = move |_q: String| async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            vec!["RTX 3090 — a graphics card".to_string()]
+        };
+        let out = interpret("mystery gizmo", &[hdd()], Some(&llm), web).await;
+        assert_eq!(out.via, "llm");
+        assert!(searched.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(llm.seen_context.lock().unwrap().as_slice(),
+            &["RTX 3090 — a graphics card".to_string()]);
+
+        // heuristic hit: no web search spent
+        let flag = searched.clone();
+        searched.store(false, std::sync::atomic::Ordering::SeqCst);
+        let web = move |_q: String| async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Vec::new()
+        };
+        let out = interpret("4to disque dur", &[hdd()], Some(&llm), web).await;
+        assert_eq!(out.via, "heuristic");
+        assert!(!searched.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
