@@ -204,25 +204,128 @@ pub(crate) fn request_body(model: &str, input: &RefineInput<'_>) -> serde_json::
     })
 }
 
-/// Parse a chat-completions response body into a `Refinement`.
-pub(crate) fn parse_response(body: &str) -> anyhow::Result<Refinement> {
+/// The assistant text of a chat-completions response body.
+pub(crate) fn content_of(body: &str) -> anyhow::Result<String> {
     let v: serde_json::Value = serde_json::from_str(body)?;
-    let content = v["choices"][0]["message"]["content"]
+    v["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("no choices[0].message.content in llm response"))?;
-    Ok(serde_json::from_str(content)?)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no choices[0].message.content in llm response"))
+}
+
+/// Models love wrapping JSON in ```fences``` or prose despite instructions —
+/// cut the answer down to its outermost object before parsing.
+pub(crate) fn extract_json(content: &str) -> &str {
+    match (content.find('{'), content.rfind('}')) {
+        (Some(start), Some(end)) if end > start => &content[start..=end],
+        _ => content,
+    }
+}
+
+/// Parse a chat-completions response body into a `Refinement`.
+#[cfg(test)]
+pub(crate) fn parse_response(body: &str) -> anyhow::Result<Refinement> {
+    let content = content_of(body)?;
+    Ok(serde_json::from_str(extract_json(&content))?)
+}
+
+impl OpenAiRefiner {
+    async fn post_chat(&self, body: &serde_json::Value) -> anyhow::Result<String> {
+        let mut request = self.http.post(&self.url).json(body);
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            // surface the backend's own message ("model X not found"…)
+            anyhow::bail!("{status}: {}", text.chars().take(300).collect::<String>().trim());
+        }
+        content_of(&text)
+    }
+
+    /// One chat call, resilient to backends that reject structured output:
+    /// a 4xx with `response_format` set retries once without it (the
+    /// prompts already demand a bare JSON object).
+    async fn chat(&self, mut body: serde_json::Value) -> anyhow::Result<String> {
+        match self.post_chat(&body).await {
+            Ok(content) => Ok(content),
+            Err(e)
+                if body.get("response_format").is_some()
+                    && e.to_string().starts_with('4') =>
+            {
+                tracing::debug!(error = %e, "structured output rejected — retrying plain");
+                body.as_object_mut().expect("chat body is an object").remove("response_format");
+                self.post_chat(&body).await
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl LlmRefiner for OpenAiRefiner {
     async fn refine(&self, input: &RefineInput<'_>) -> anyhow::Result<Refinement> {
-        let mut request = self.http.post(&self.url).json(&request_body(&self.model, input));
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
-        let body = request.send().await?.error_for_status()?.text().await?;
-        parse_response(&body)
+        let content = self.chat(request_body(&self.model, input)).await?;
+        Ok(serde_json::from_str(extract_json(&content))?)
     }
+}
+
+// ---- endpoint discovery & probing (settings UI helpers) ----
+
+fn probe_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs.min(15)))
+        .user_agent(concat!("ferret/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("building llm probe client")
+}
+
+/// `GET {base_url}/models` — the standard OpenAI-compatible catalog.
+pub async fn list_models(base_url: &str, api_key: Option<&str>) -> anyhow::Result<Vec<String>> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut request = probe_client(10).get(&url);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("{status}: {}", text.chars().take(300).collect::<String>().trim());
+    }
+    let v: serde_json::Value = serde_json::from_str(&text)?;
+    let mut models: Vec<String> = v["data"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no data[] in {url} response"))?
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(str::to_string))
+        .collect();
+    models.sort();
+    Ok(models)
+}
+
+/// One tiny real completion against the endpoint — the settings panel's
+/// "Test" button. Errors carry the backend's message verbatim.
+pub async fn probe(base_url: &str, model: &str, api_key: Option<&str>) -> anyhow::Result<()> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 20,
+        "messages": [{ "role": "user", "content": "Reply with the single word: ok" }],
+    });
+    let mut request = probe_client(15).post(&url).json(&body);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("{status}: {}", text.chars().take(300).collect::<String>().trim());
+    }
+    content_of(&text).map(|_| ())
 }
 
 // ---- guided-creation interpretation ----
@@ -270,10 +373,12 @@ pub struct LlmProposalSpec {
 
 #[async_trait::async_trait]
 pub trait LlmInterpret: Send + Sync {
+    /// `web_context`: search-result snippets about the text, possibly empty.
     async fn interpret(
         &self,
         text: &str,
         categories: &[ferret_domain::Category],
+        web_context: &[String],
     ) -> anyhow::Result<LlmInterpretation>;
 }
 
@@ -321,6 +426,7 @@ pub(crate) fn interpret_request_body(
     model: &str,
     text: &str,
     categories: &[ferret_domain::Category],
+    web_context: &[String],
 ) -> serde_json::Value {
     let known: Vec<serde_json::Value> = categories
         .iter()
@@ -347,10 +453,13 @@ pub(crate) fn interpret_request_body(
                  category_slug to null and draft a `proposal`: a kebab-case slug, a short \
                  label, title words that identify the product (aliases), and 1-4 spec \
                  dimensions buyers filter on (kind number with a unit, enum with \
-                 allowed_values, or boolean). Answer only with the JSON object." },
+                 allowed_values, or boolean). `web_search_results`, when present, are \
+                 snippets about the search — use them to identify what the product is. \
+                 Answer only with the JSON object." },
             { "role": "user", "content": serde_json::json!({
                 "search": text,
                 "known_categories": known,
+                "web_search_results": web_context,
             }).to_string() }
         ],
         "response_format": {
@@ -366,20 +475,12 @@ impl LlmInterpret for OpenAiRefiner {
         &self,
         text: &str,
         categories: &[ferret_domain::Category],
+        web_context: &[String],
     ) -> anyhow::Result<LlmInterpretation> {
-        let mut request = self
-            .http
-            .post(&self.url)
-            .json(&interpret_request_body(&self.model, text, categories));
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
-        let body = request.send().await?.error_for_status()?.text().await?;
-        let v: serde_json::Value = serde_json::from_str(&body)?;
-        let content = v["choices"][0]["message"]["content"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("no choices[0].message.content in llm response"))?;
-        Ok(serde_json::from_str(content)?)
+        let content = self
+            .chat(interpret_request_body(&self.model, text, categories, web_context))
+            .await?;
+        Ok(serde_json::from_str(extract_json(&content))?)
     }
 }
 
@@ -409,6 +510,40 @@ mod tests {
         assert_eq!(r.verdict, LlmVerdict::StuffedTitle);
         assert_eq!(r.reason, "bracket accessory, not a GPU");
         assert_eq!(r.capacity_gb, None);
+    }
+
+    #[test]
+    fn extract_json_strips_fences_and_prose() {
+        assert_eq!(extract_json("{\"a\": 1}"), "{\"a\": 1}");
+        assert_eq!(extract_json("```json\n{\"a\": 1}\n```"), "{\"a\": 1}");
+        assert_eq!(extract_json("Sure! Here is it: {\"a\": {\"b\": 2}} hope it helps"),
+            "{\"a\": {\"b\": 2}}");
+        assert_eq!(extract_json("no json at all"), "no json at all");
+    }
+
+    #[test]
+    fn parses_fenced_content() {
+        let body = r#"{
+            "choices": [{ "message": { "role": "assistant", "content":
+                "```json\n{\"verdict\": \"genuine\", \"reason\": \"looks fine\", \"capacity_gb\": 4000, \"condition\": \"used\"}\n```"
+            }}]
+        }"#;
+        let r = parse_response(body).unwrap();
+        assert_eq!(r.verdict, LlmVerdict::Genuine);
+        assert_eq!(r.capacity_gb, Some(4000));
+    }
+
+    #[test]
+    fn interpret_request_carries_web_context() {
+        let body = interpret_request_body(
+            "qwen3",
+            "RTX 3090",
+            &[],
+            &["NVIDIA GeForce RTX 3090 — a graphics card".into()],
+        );
+        let user = body["messages"][1]["content"].as_str().unwrap();
+        assert!(user.contains("web_search_results"));
+        assert!(user.contains("a graphics card"));
     }
 
     #[test]

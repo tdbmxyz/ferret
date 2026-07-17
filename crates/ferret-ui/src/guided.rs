@@ -139,6 +139,7 @@ pub fn GuidedCreate() -> impl IntoView {
                     proposal: None,
                     via: "edit".into(),
                     llm_active: true,
+                    llm_error: None,
                 }));
             });
         });
@@ -336,6 +337,9 @@ pub fn GuidedCreate() -> impl IntoView {
                 Some(view! {
                     <div class="guided-result">
                         {confirmation_header(&interp)}
+                        {interp.llm_error.clone().map(|e| view! {
+                            <p class="error">{format!("LLM call failed: {e}")}</p>
+                        })}
                         {interp.proposal.clone().map(|p| proposal_card(p, approve_proposal.clone()))}
                         {interp.category.clone().map(|category| view! {
                             <div>

@@ -211,6 +211,10 @@ pub struct Interpretation {
     /// a "none" honestly (unknown product vs. no LLM configured).
     #[serde(default)]
     pub llm_active: bool,
+    /// Set when the LLM step was attempted and failed (fail-open) — shown
+    /// to the user instead of silently pretending nothing matched.
+    #[serde(default)]
+    pub llm_error: Option<String>,
 }
 
 /// Instant, deterministic interpretation: categorize the text itself, then

@@ -34,7 +34,14 @@ Configuration reference: `crates/ferret-server/ferret.example.toml`
 The `[llm]` section (any OpenAI-compatible endpoint) is the base; the UI's
 ⚙ panel can store an override (URL, model, API key) in the database via
 `PUT /api/settings/llm`, applied live without a restart. `DELETE` drops the
-override and returns to the TOML values.
+override and returns to the TOML values. The panel can list the endpoint's
+models (`POST /api/settings/llm/models` → `{base_url}/models`) and run a
+real test completion (`POST /api/settings/llm/test`); LLM calls retry
+without `response_format` on backends that reject structured output and
+tolerate markdown-fenced JSON answers. Guided-creation interprets also
+feed the LLM a handful of DuckDuckGo snippets about the search text
+(fail-open, one request per interpret) so it can identify products it
+doesn't know.
 
 ## Pipeline
 

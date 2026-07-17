@@ -29,6 +29,8 @@ pub fn router(state: AppState) -> Router {
             "/api/settings/llm",
             get(get_llm_settings).put(put_llm_settings).delete(delete_llm_settings),
         )
+        .route("/api/settings/llm/models", axum::routing::post(list_llm_models))
+        .route("/api/settings/llm/test", axum::routing::post(test_llm))
         .route("/api/searches", axum::routing::post(start_search))
         .route("/api/searches/{id}", get(search_progress))
         .with_state(state)
@@ -176,6 +178,7 @@ async fn interpret_text(
         &req.text,
         &categories,
         interpreter.as_deref(),
+        |q: String| async move { crate::websearch::snippets(&q).await },
     )
     .await;
     Ok(Json(out).into_response())
@@ -216,6 +219,56 @@ async fn put_llm_settings(
 async fn delete_llm_settings(State(state): State<AppState>) -> Result<Response, ApiError> {
     state.db.delete_setting(crate::llm::LLM_SETTINGS_KEY).await?;
     apply_llm(&state, None).await
+}
+
+/// Resolve probe inputs: fields typed in the form win, missing ones fall
+/// back to the effective settings (and the stored/config API key).
+async fn probe_target(
+    state: &AppState,
+    req: ferret_domain::LlmProbeRequest,
+) -> (String, String, Option<String>) {
+    let over = crate::llm::load_override(&state.db).await;
+    let eff = crate::llm::effective(&state.search.config.llm, over.as_ref())
+        .unwrap_or_else(|_| crate::llm::EffectiveLlm {
+            enabled: false,
+            base_url: state.search.config.llm.base_url.clone(),
+            model: state.search.config.llm.model.clone(),
+            timeout_secs: state.search.config.llm.timeout_secs,
+            api_key: None,
+            from_override: false,
+            override_key_set: false,
+        });
+    let pick = |v: Option<String>, fallback: String| {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(fallback)
+    };
+    (
+        pick(req.base_url, eff.base_url),
+        pick(req.model, eff.model),
+        req.api_key.filter(|k| !k.is_empty()).or(eff.api_key),
+    )
+}
+
+async fn list_llm_models(
+    State(state): State<AppState>,
+    Json(req): Json<ferret_domain::LlmProbeRequest>,
+) -> Response {
+    let (base_url, _, api_key) = probe_target(&state, req).await;
+    match crate::llm::list_models(&base_url, api_key.as_deref()).await {
+        Ok(models) => Json(models).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+async fn test_llm(
+    State(state): State<AppState>,
+    Json(req): Json<ferret_domain::LlmProbeRequest>,
+) -> Response {
+    let (base_url, model, api_key) = probe_target(&state, req).await;
+    let result = match crate::llm::probe(&base_url, &model, api_key.as_deref()).await {
+        Ok(()) => ferret_domain::LlmProbeResult { ok: true, error: None },
+        Err(e) => ferret_domain::LlmProbeResult { ok: false, error: Some(e.to_string()) },
+    };
+    Json(result).into_response()
 }
 
 /// Rebuild the live LLM layer and answer with the new effective settings.
