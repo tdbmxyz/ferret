@@ -51,16 +51,20 @@ async fn main() -> anyhow::Result<()> {
         None => Arc::new(NoopNotifier),
     };
 
-    let llm_client = llm::OpenAiRefiner::new(&config.llm)
-        .context("configuring llm refiner")?
-        .map(Arc::new);
-    if llm_client.is_some() {
-        tracing::info!(base_url = config.llm.base_url, "llm refinement enabled");
+    // TOML base + DB override (editable from the UI, applied live)
+    let llm_override = llm::load_override(&db).await;
+    let llm_runtime = llm::build_runtime(
+        llm::effective(&config.llm, llm_override.as_ref()).context("configuring llm")?,
+    );
+    if llm_runtime.status.enabled {
+        tracing::info!(
+            base_url = llm_runtime.settings.base_url,
+            model = llm_runtime.settings.model,
+            from_override = llm_runtime.settings.from_override,
+            "llm layer enabled"
+        );
     }
-    let refiner: Option<Arc<dyn llm::LlmRefiner>> =
-        llm_client.clone().map(|r| r as Arc<dyn llm::LlmRefiner>);
-    let interpreter: Option<Arc<dyn llm::LlmInterpret>> =
-        llm_client.map(|r| r as Arc<dyn llm::LlmInterpret>);
+    let llm_handle: llm::LlmHandle = Arc::new(tokio::sync::RwLock::new(llm_runtime));
 
     let families = Arc::new(config.families.clone());
 
@@ -117,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         families.clone(),
         config.scrape.clone(),
         notifier,
-        refiner,
+        llm_handle.clone(),
         statuses.clone(),
     );
 
@@ -131,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
         families,
         notifier: notifier_api,
         statuses: statuses.clone(),
-        interpreter,
+        llm: llm_handle,
         search: search_context,
         jobs: Arc::new(tokio::sync::RwLock::new(Default::default())),
         shared_queries,

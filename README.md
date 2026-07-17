@@ -31,6 +31,11 @@ Configuration reference: `crates/ferret-server/ferret.example.toml`
 (declarative `[[sources]]`, the `[leboncoin]` plugin, `[[families]]` tables,
 `[llm]` refinement, `[notifications]` via ntfy).
 
+The `[llm]` section (any OpenAI-compatible endpoint) is the base; the UI's
+⚙ panel can store an override (URL, model, API key) in the database via
+`PUT /api/settings/llm`, applied live without a restart. `DELETE` drops the
+override and returns to the TOML values.
+
 ## Pipeline
 
 ```

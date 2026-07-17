@@ -5,6 +5,7 @@
 mod categories;
 mod deals;
 mod guided;
+mod settings;
 mod sparkline;
 mod status;
 mod watches;
@@ -95,11 +96,14 @@ pub fn App(config: AppConfig) -> impl IntoView {
         </header>
         {move || show_connect.get().then(|| view! {
             <div class="connect">
-                <label>"Server: "</label>
-                <input prop:value=server placeholder="http://zeus:4800"
-                    on:input=move |ev| server.set(event_target_value(&ev))/>
-                <button on:click=save_server>"Save & reload"</button>
-                <span class="muted">"empty = back to automatic"</span>
+                <div class="settings-block">
+                    <span class="settings-title">"Server (this device)"</span>
+                    <input prop:value=server placeholder="http://zeus:4800"
+                        on:input=move |ev| server.set(event_target_value(&ev))/>
+                    <button on:click=save_server>"Save & reload"</button>
+                    <span class="muted">"empty = back to automatic"</span>
+                </div>
+                <settings::LlmSettingsPanel/>
             </div>
         })}
         <main>

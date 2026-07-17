@@ -1,17 +1,138 @@
-//! Categories management: review LLM-proposed categories (approve/reject)
-//! and inspect the active ones.
+//! Categories management: review LLM-proposed categories, and create or
+//! edit any category's aliases and spec table — the schema behind guided
+//! watch filters.
 
 use ferret_client::FerretClient;
-use ferret_domain::{Category, CategoryStatus, SpecKind};
+use ferret_domain::{Category, CategoryOrigin, CategorySpec, CategoryStatus, SpecKind};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::DataVersion;
 
+/// One editable spec line; every field is its own signal so typing never
+/// re-renders (and never drops focus on) the row.
+#[derive(Clone)]
+struct SpecRow {
+    id: u32,
+    key: RwSignal<String>,
+    label: RwSignal<String>,
+    kind: RwSignal<String>,
+    unit: RwSignal<String>,
+    values: RwSignal<String>,
+    hint: RwSignal<String>,
+}
+
+impl SpecRow {
+    fn new(id: u32, spec: Option<&CategorySpec>) -> Self {
+        let kind = match spec.map(|s| s.kind) {
+            Some(SpecKind::Enum) => "enum",
+            Some(SpecKind::Boolean) => "boolean",
+            _ => "number",
+        };
+        Self {
+            id,
+            key: RwSignal::new(spec.map(|s| s.key.clone()).unwrap_or_default()),
+            label: RwSignal::new(spec.map(|s| s.label.clone()).unwrap_or_default()),
+            kind: RwSignal::new(kind.into()),
+            unit: RwSignal::new(spec.and_then(|s| s.unit.clone()).unwrap_or_default()),
+            values: RwSignal::new(spec.map(|s| s.allowed_values.join(", ")).unwrap_or_default()),
+            hint: RwSignal::new(spec.and_then(|s| s.extraction_hint.clone()).unwrap_or_default()),
+        }
+    }
+
+    fn to_spec(&self) -> Option<CategorySpec> {
+        let key = self.key.get_untracked().trim().to_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        let label = {
+            let l = self.label.get_untracked().trim().to_string();
+            if l.is_empty() { key.clone() } else { l }
+        };
+        let kind = match self.kind.get_untracked().as_str() {
+            "enum" => SpecKind::Enum,
+            "boolean" => SpecKind::Boolean,
+            _ => SpecKind::Number,
+        };
+        let unit = Some(self.unit.get_untracked().trim().to_string()).filter(|u| !u.is_empty());
+        let hint = Some(self.hint.get_untracked().trim().to_string()).filter(|h| !h.is_empty());
+        Some(CategorySpec {
+            key,
+            label,
+            kind,
+            unit,
+            allowed_values: split_list(&self.values.get_untracked()),
+            extraction_hint: hint,
+        })
+    }
+}
+
+fn split_list(raw: &str) -> Vec<String> {
+    raw.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect()
+}
+
+/// The open editor: header signals + spec rows + what it edits.
+#[derive(Clone)]
+struct Editor {
+    original: Option<Category>,
+    slug: RwSignal<String>,
+    label: RwSignal<String>,
+    aliases: RwSignal<String>,
+    rows: RwSignal<Vec<SpecRow>>,
+    next_id: RwSignal<u32>,
+}
+
+impl Editor {
+    fn open(category: Option<Category>) -> Self {
+        let specs = category.as_ref().map(|c| c.specs.clone()).unwrap_or_default();
+        let rows: Vec<SpecRow> =
+            specs.iter().enumerate().map(|(i, s)| SpecRow::new(i as u32, Some(s))).collect();
+        Self {
+            slug: RwSignal::new(category.as_ref().map(|c| c.slug.clone()).unwrap_or_default()),
+            label: RwSignal::new(category.as_ref().map(|c| c.label.clone()).unwrap_or_default()),
+            aliases: RwSignal::new(
+                category.as_ref().map(|c| c.aliases.join(", ")).unwrap_or_default(),
+            ),
+            next_id: RwSignal::new(rows.len() as u32),
+            rows: RwSignal::new(rows),
+            original: category,
+        }
+    }
+
+    fn to_category(&self) -> Result<Category, String> {
+        let slug = self.slug.get_untracked().trim().to_lowercase().replace(' ', "-");
+        if slug.is_empty() {
+            return Err("the category needs a slug".into());
+        }
+        let label = {
+            let l = self.label.get_untracked().trim().to_string();
+            if l.is_empty() { slug.clone() } else { l }
+        };
+        Ok(Category {
+            slug,
+            label,
+            aliases: split_list(&self.aliases.get_untracked()),
+            origin: self.original.as_ref().map(|c| c.origin).unwrap_or(CategoryOrigin::User),
+            status: self.original.as_ref().map(|c| c.status).unwrap_or(CategoryStatus::Active),
+            specs: self.rows.get_untracked().iter().filter_map(SpecRow::to_spec).collect(),
+            created_at: self
+                .original
+                .as_ref()
+                .map(|c| c.created_at)
+                .unwrap_or_else(chrono::Utc::now),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EditorSlot(RwSignal<Option<Editor>>);
+
 #[component]
 pub fn CategoriesView() -> impl IntoView {
     let client: FerretClient = expect_context();
     let version: DataVersion = expect_context();
+    let editor = EditorSlot(RwSignal::new(None));
+    provide_context(editor);
     let categories = LocalResource::new({
         let client = client.clone();
         move || {
@@ -27,6 +148,12 @@ pub fn CategoriesView() -> impl IntoView {
                 "Categories drive interpretation and filters. Proposed ones were drafted \
                  by the LLM and only start categorizing deals once approved."
             </p>
+            <div class="toolbar">
+                <button on:click=move |_| editor.0.set(Some(Editor::open(None)))>
+                    "New category"
+                </button>
+            </div>
+            {move || editor.0.get().map(editor_view)}
             <ul class="watches">
                 {move || {
                     categories
@@ -41,9 +168,107 @@ pub fn CategoriesView() -> impl IntoView {
     }
 }
 
+fn editor_view(editor: Editor) -> impl IntoView {
+    let client: FerretClient = expect_context();
+    let version: DataVersion = expect_context();
+    let slot: EditorSlot = expect_context();
+    let error = RwSignal::new(None::<String>);
+    let is_new = editor.original.is_none();
+
+    let add_row = {
+        let editor = editor.clone();
+        move |_| {
+            let id = editor.next_id.get_untracked();
+            editor.next_id.set(id + 1);
+            editor.rows.update(|rows| rows.push(SpecRow::new(id, None)));
+        }
+    };
+    let save = {
+        let editor = editor.clone();
+        move |_| match editor.to_category() {
+            Ok(category) => {
+                let client = client.clone();
+                spawn_local(async move {
+                    match client.upsert_category(&category).await {
+                        Ok(_) => {
+                            slot.0.set(None);
+                            version.0.update(|v| *v += 1);
+                        }
+                        Err(e) => error.set(Some(e.to_string())),
+                    }
+                });
+            }
+            Err(e) => error.set(Some(e)),
+        }
+    };
+    let rows = editor.rows;
+
+    view! {
+        <div class="editor">
+            <span class="settings-title">
+                {if is_new { "New category" } else { "Edit category" }}
+            </span>
+            <div class="editor-head">
+                <input placeholder="slug (stable id)" prop:value=editor.slug
+                    disabled=!is_new
+                    on:input=move |ev| editor.slug.set(event_target_value(&ev))/>
+                <input placeholder="label" prop:value=editor.label
+                    on:input=move |ev| editor.label.set(event_target_value(&ev))/>
+                <input class="wide" placeholder="aliases (title words that identify it), comma-separated"
+                    prop:value=editor.aliases
+                    on:input=move |ev| editor.aliases.set(event_target_value(&ev))/>
+            </div>
+            <span class="muted">"Specs — the filters buyers get for this category:"</span>
+            {move || rows.get().into_iter().map(|row| spec_row_view(row, rows)).collect_view()}
+            <div class="editor-actions">
+                <button on:click=add_row>"+ spec"</button>
+                <button on:click=save>"Save category"</button>
+                <button on:click=move |_| slot.0.set(None)>"Cancel"</button>
+            </div>
+            {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
+        </div>
+    }
+}
+
+fn spec_row_view(row: SpecRow, rows: RwSignal<Vec<SpecRow>>) -> impl IntoView {
+    let id = row.id;
+    let kind = row.kind;
+    let is = move |k: &'static str| move || kind.get() == k;
+    view! {
+        <div class="spec-row">
+            <input class="narrow" placeholder="key" prop:value=row.key
+                on:input=move |ev| row.key.set(event_target_value(&ev))/>
+            <input placeholder="label" prop:value=row.label
+                on:input=move |ev| row.label.set(event_target_value(&ev))/>
+            <select on:change=move |ev| kind.set(event_target_value(&ev))>
+                <option value="number" selected=is("number")>"number"</option>
+                <option value="enum" selected=is("enum")>"enum"</option>
+                <option value="boolean" selected=is("boolean")>"boolean"</option>
+            </select>
+            {move || (kind.get() == "number").then(|| view! {
+                <input class="narrow" placeholder="unit (GB…)" prop:value=row.unit
+                    on:input=move |ev| row.unit.set(event_target_value(&ev))/>
+            })}
+            {move || (kind.get() == "enum").then(|| view! {
+                <input class="wide" placeholder="allowed values, comma-separated" prop:value=row.values
+                    on:input=move |ev| row.values.set(event_target_value(&ev))/>
+            })}
+            {move || (kind.get() == "boolean").then(|| view! {
+                <input placeholder="title keywords meaning yes" prop:value=row.hint
+                    on:input=move |ev| row.hint.set(event_target_value(&ev))/>
+            })}
+            <button class="danger"
+                on:click=move |_| rows.update(|r| r.retain(|s| s.id != id))>
+                "✕"
+            </button>
+        </div>
+    }
+}
+
 fn category_row(category: Category) -> impl IntoView {
     let client: FerretClient = expect_context();
     let version: DataVersion = expect_context();
+    let slot: EditorSlot = expect_context();
     let proposed = category.status == CategoryStatus::Proposed;
 
     let specs: Vec<String> = category
@@ -71,6 +296,10 @@ fn category_row(category: Category) -> impl IntoView {
                 version.0.update(|v| *v += 1);
             });
         }
+    };
+    let edit = {
+        let category = category.clone();
+        move |_| slot.0.set(Some(Editor::open(Some(category.clone()))))
     };
     let remove = {
         let client = client.clone();
@@ -103,6 +332,7 @@ fn category_row(category: Category) -> impl IntoView {
             </div>
             <div class="watch-actions">
                 {proposed.then(|| view! { <button on:click=approve.clone()>"approve"</button> })}
+                <button on:click=edit>"edit"</button>
                 <button class="danger" on:click=remove>"delete"</button>
             </div>
         </li>

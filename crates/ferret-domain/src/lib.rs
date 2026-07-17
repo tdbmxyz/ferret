@@ -10,6 +10,7 @@ pub mod matching;
 pub mod normalize;
 pub mod price;
 pub mod refine;
+pub mod settings;
 pub mod status;
 pub mod watch;
 
@@ -30,5 +31,6 @@ pub struct HealthResponse {
 pub use deal::{Deal, DealStatus, Flag, LlmVerdict, PricePoint};
 pub use family::{FamilyMatch, ProductFamily};
 pub use listing::RawListing;
-pub use status::{SearchJob, SourceProgress, SourceStatus, StatusResponse, TickStats};
+pub use settings::{LlmSettings, LlmSettingsUpdate};
+pub use status::{LlmStatus, SearchJob, SourceProgress, SourceStatus, StatusResponse, TickStats};
 pub use watch::{Watch, WatchRequest};

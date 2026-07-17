@@ -49,7 +49,23 @@ pub fn SourcesStrip() -> impl IntoView {
                     <span class="badge bad">"no sources configured — nothing will be scraped"</span>
                 }
                 .into_any(),
-                Some(s) => s
+                Some(s) => {
+                    let llm_chip = if s.llm.enabled {
+                        view! {
+                            <span class="badge ok">
+                                {format!("LLM ✓ {}", s.llm.model.clone().unwrap_or_default())}
+                            </span>
+                        }
+                        .into_any()
+                    } else {
+                        view! {
+                            <span class="badge muted" title="heuristics only — configure under ⚙">
+                                "LLM off"
+                            </span>
+                        }
+                        .into_any()
+                    };
+                    let sources = s
                     .sources
                     .iter()
                     .map(|src| {
@@ -72,8 +88,9 @@ pub fn SourcesStrip() -> impl IntoView {
                             </span>
                         }
                     })
-                    .collect_view()
-                    .into_any(),
+                    .collect_view();
+                    view! { {sources} {llm_chip} }.into_any()
+                }
             }}
         </div>
     }

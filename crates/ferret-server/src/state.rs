@@ -44,8 +44,8 @@ pub struct AppState {
     pub families: Arc<Vec<ProductFamily>>,
     pub notifier: Arc<dyn Notify>,
     pub statuses: StatusMap,
-    /// LLM text→category interpreter (None when the pass is disabled).
-    pub interpreter: Option<Arc<dyn crate::llm::LlmInterpret>>,
+    /// Live LLM layer (refiner + interpreter), swapped when settings change.
+    pub llm: crate::llm::LlmHandle,
     /// Config context for building one-shot guided-creation searches.
     pub search: Arc<crate::search::SearchContext>,
     pub jobs: crate::search::JobMap,

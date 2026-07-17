@@ -24,6 +24,8 @@ pub enum SpecKind {
 pub enum CategoryOrigin {
     Curated,
     Llm,
+    /// Created or hand-edited from the UI.
+    User,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +207,10 @@ pub struct Interpretation {
     pub proposal: Option<Category>,
     /// "heuristic" | "llm" | "none" — how the answer was produced.
     pub via: String,
+    /// Whether an LLM was available for the ladder — lets the UI explain
+    /// a "none" honestly (unknown product vs. no LLM configured).
+    #[serde(default)]
+    pub llm_active: bool,
 }
 
 /// Instant, deterministic interpretation: categorize the text itself, then

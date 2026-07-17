@@ -44,11 +44,22 @@ impl SourceStatus {
     }
 }
 
+/// Whether the LLM layer (refinement + interpretation) is live, shown in
+/// the sources strip so a silent heuristic-only setup is visible.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmStatus {
+    pub enabled: bool,
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub sources: Vec<SourceStatus>,
     /// Current match count per watch id.
     pub watch_matches: HashMap<Uuid, i64>,
+    // default: older servers don't send it — the UI then shows nothing
+    #[serde(default)]
+    pub llm: LlmStatus,
 }
 
 /// Per-source progress of an ad-hoc guided-creation search.

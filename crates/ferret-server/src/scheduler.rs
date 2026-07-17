@@ -10,7 +10,7 @@ use ferret_domain::{ProductFamily, SourceStatus, TickStats};
 
 use crate::config::ScrapeConfig;
 use crate::db::Db;
-use crate::llm::LlmRefiner;
+use crate::llm::LlmHandle;
 use crate::notify::Notify;
 use crate::pipeline;
 use crate::scrape::DealSource;
@@ -62,7 +62,7 @@ pub fn spawn_all(
     families: Arc<Vec<ProductFamily>>,
     scrape: ScrapeConfig,
     notifier: Arc<dyn Notify>,
-    refiner: Option<Arc<dyn LlmRefiner>>,
+    llm: LlmHandle,
     statuses: StatusMap,
 ) {
     for (source, interval) in sources {
@@ -70,7 +70,7 @@ pub fn spawn_all(
         let families = families.clone();
         let scrape = scrape.clone();
         let notifier = notifier.clone();
-        let refiner = refiner.clone();
+        let llm = llm.clone();
         let statuses = statuses.clone();
         tokio::spawn(async move {
             // register as idle right away so /api/status lists the source
@@ -79,7 +79,7 @@ pub fn spawn_all(
                 source.id().to_string(),
                 SourceStatus::idle(source.id(), interval.as_secs() / 60),
             );
-            run_source(source, interval, db, families, scrape, notifier, refiner, statuses).await;
+            run_source(source, interval, db, families, scrape, notifier, llm, statuses).await;
         });
     }
 }
@@ -110,7 +110,7 @@ async fn run_source(
     families: Arc<Vec<ProductFamily>>,
     scrape: ScrapeConfig,
     notifier: Arc<dyn Notify>,
-    refiner: Option<Arc<dyn LlmRefiner>>,
+    llm: LlmHandle,
     statuses: StatusMap,
 ) {
     let mut failures = FailureState::new(scrape.failure_alert_after);
@@ -118,6 +118,8 @@ async fn run_source(
         match source.fetch().await {
             Ok(listings) => {
                 let count = listings.len();
+                // read per tick so settings changes apply without restart
+                let refiner = llm.read().await.refiner.clone();
                 match pipeline::process_listings(
                     &db,
                     &families,
