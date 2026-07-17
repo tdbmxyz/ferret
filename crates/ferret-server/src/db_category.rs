@@ -62,6 +62,7 @@ impl Db {
                     .map_err(|e| DbError::Corrupt(format!("bad aliases: {e}")))?,
                 origin: match row.get::<String, _>("origin").as_str() {
                     "curated" => CategoryOrigin::Curated,
+                    "user" => CategoryOrigin::User,
                     _ => CategoryOrigin::Llm,
                 },
                 status: match row.get::<String, _>("status").as_str() {
@@ -90,6 +91,7 @@ impl Db {
         .bind(match category.origin {
             CategoryOrigin::Curated => "curated",
             CategoryOrigin::Llm => "llm",
+            CategoryOrigin::User => "user",
         })
         .bind(match category.status {
             CategoryStatus::Active => "active",

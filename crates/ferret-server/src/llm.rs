@@ -44,12 +44,63 @@ pub struct OpenAiRefiner {
 }
 
 impl OpenAiRefiner {
-    /// `None` when the pass is disabled.
-    pub fn new(config: &LlmConfig) -> anyhow::Result<Option<Self>> {
-        if !config.enabled {
-            return Ok(None);
+    fn from_effective(eff: &EffectiveLlm) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(eff.timeout_secs))
+                .user_agent(concat!("ferret/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("building llm http client"),
+            url: format!("{}/chat/completions", eff.base_url.trim_end_matches('/')),
+            model: eff.model.clone(),
+            api_key: eff.api_key.clone(),
         }
-        let api_key = match &config.api_key_file {
+    }
+}
+
+// ---- runtime configuration: TOML base + DB override, hot-swappable ----
+
+/// DB-stored override of the `[llm]` TOML section (settings key "llm").
+/// Saved wholesale from the UI; empty url/model fields fall back to TOML.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, Deserialize)]
+pub struct LlmOverride {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+}
+
+pub const LLM_SETTINGS_KEY: &str = "llm";
+
+/// Fully resolved LLM configuration, ready to build clients from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveLlm {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub timeout_secs: u64,
+    pub api_key: Option<String>,
+    pub from_override: bool,
+    /// The override carries its own key (drives the UI's "clear key").
+    pub override_key_set: bool,
+}
+
+/// Merge the TOML base with an optional DB override. The key file is only
+/// read when the result is enabled — a broken path never blocks startup of
+/// a disabled pass.
+pub fn effective(base: &LlmConfig, o: Option<&LlmOverride>) -> anyhow::Result<EffectiveLlm> {
+    let pick = |over: &str, conf: &str| {
+        if over.trim().is_empty() { conf.to_string() } else { over.trim().to_string() }
+    };
+    let (enabled, base_url, model) = match o {
+        Some(o) => (o.enabled, pick(&o.base_url, &base.base_url), pick(&o.model, &base.model)),
+        None => (base.enabled, base.base_url.clone(), base.model.clone()),
+    };
+    let override_key = o.and_then(|o| o.api_key.clone()).filter(|k| !k.is_empty());
+    let override_key_set = override_key.is_some();
+    let api_key = match (&override_key, enabled) {
+        (Some(key), _) => Some(key.clone()),
+        (None, true) => match &base.api_key_file {
             Some(path) => Some(
                 std::fs::read_to_string(path)
                     .map_err(|e| anyhow::anyhow!("reading llm api key {}: {e}", path.display()))?
@@ -57,18 +108,56 @@ impl OpenAiRefiner {
                     .to_string(),
             ),
             None => None,
-        };
-        Ok(Some(Self {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(config.timeout_secs))
-                .user_agent(concat!("ferret/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .expect("building llm http client"),
-            url: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
-            model: config.model.clone(),
-            api_key,
-        }))
+        },
+        (None, false) => None,
+    };
+    Ok(EffectiveLlm {
+        enabled,
+        base_url,
+        model,
+        timeout_secs: base.timeout_secs,
+        api_key,
+        from_override: o.is_some(),
+        override_key_set,
+    })
+}
+
+/// The live LLM layer, swapped in place when settings change so the
+/// scheduler and API handlers pick the new backend up without a restart.
+#[derive(Clone, Default)]
+pub struct LlmRuntime {
+    pub refiner: Option<std::sync::Arc<dyn LlmRefiner>>,
+    pub interpreter: Option<std::sync::Arc<dyn LlmInterpret>>,
+    pub status: ferret_domain::LlmStatus,
+    pub settings: ferret_domain::LlmSettings,
+}
+
+pub type LlmHandle = std::sync::Arc<tokio::sync::RwLock<LlmRuntime>>;
+
+pub fn build_runtime(eff: EffectiveLlm) -> LlmRuntime {
+    let client = eff.enabled.then(|| std::sync::Arc::new(OpenAiRefiner::from_effective(&eff)));
+    LlmRuntime {
+        refiner: client.clone().map(|c| c as std::sync::Arc<dyn LlmRefiner>),
+        interpreter: client.map(|c| c as std::sync::Arc<dyn LlmInterpret>),
+        status: ferret_domain::LlmStatus {
+            enabled: eff.enabled,
+            model: eff.enabled.then(|| eff.model.clone()),
+        },
+        settings: ferret_domain::LlmSettings {
+            enabled: eff.enabled,
+            base_url: eff.base_url,
+            model: eff.model,
+            api_key_set: eff.override_key_set,
+            from_override: eff.from_override,
+        },
     }
+}
+
+pub async fn load_override(db: &crate::db::Db) -> Option<LlmOverride> {
+    let raw = db.get_setting(LLM_SETTINGS_KEY).await.ok()??;
+    serde_json::from_str(&raw)
+        .map_err(|e| tracing::warn!(error = %e, "ignoring corrupt llm settings override"))
+        .ok()
 }
 
 /// The JSON schema the model must answer with (strict structured output).
@@ -344,7 +433,34 @@ mod tests {
 
     #[test]
     fn disabled_config_builds_no_refiner() {
-        let refiner = OpenAiRefiner::new(&crate::config::LlmConfig::default()).unwrap();
-        assert!(refiner.is_none());
+        let eff = effective(&crate::config::LlmConfig::default(), None).unwrap();
+        let runtime = build_runtime(eff);
+        assert!(runtime.refiner.is_none() && runtime.interpreter.is_none());
+        assert!(!runtime.status.enabled && runtime.status.model.is_none());
+    }
+
+    #[test]
+    fn override_supersedes_config_blank_fields_fall_back() {
+        let base = crate::config::LlmConfig {
+            model: "conf-model".into(),
+            ..Default::default()
+        };
+        let o = LlmOverride {
+            enabled: true,
+            base_url: "http://ollama:11434/v1".into(),
+            model: String::new(),
+            api_key: Some("sk-x".into()),
+        };
+        let eff = effective(&base, Some(&o)).unwrap();
+        assert!(eff.enabled, "override enables a config-disabled pass");
+        assert_eq!(eff.base_url, "http://ollama:11434/v1");
+        assert_eq!(eff.model, "conf-model", "blank override field falls back to TOML");
+        assert_eq!(eff.api_key.as_deref(), Some("sk-x"));
+        assert!(eff.from_override && eff.override_key_set);
+
+        let runtime = build_runtime(eff);
+        assert!(runtime.refiner.is_some() && runtime.interpreter.is_some());
+        assert_eq!(runtime.status.model.as_deref(), Some("conf-model"));
+        assert!(runtime.settings.api_key_set && runtime.settings.from_override);
     }
 }

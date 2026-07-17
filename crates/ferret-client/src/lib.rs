@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use ferret_domain::{
-    Category, Deal, HealthResponse, Interpretation, PricePoint, ProductFamily, SearchJob,
-    StatusResponse, Watch, WatchRequest,
+    Category, Deal, HealthResponse, Interpretation, LlmSettings, LlmSettingsUpdate, PricePoint,
+    ProductFamily, SearchJob, StatusResponse, Watch, WatchRequest,
 };
 use serde::Serialize;
 use url::Url;
@@ -191,6 +191,25 @@ impl FerretClient {
             Duration::from_secs(60),
         )
         .await
+    }
+
+    // ---- server settings ----
+
+    /// Effective LLM settings (TOML base + DB override).
+    pub async fn llm_settings(&self) -> Result<LlmSettings> {
+        self.get("api/settings/llm").await
+    }
+
+    /// Store an override and apply it live; answers the new effective view.
+    pub async fn update_llm_settings(&self, update: &LlmSettingsUpdate) -> Result<LlmSettings> {
+        self.send(self.http.put(self.url("api/settings/llm")?).json(update), DATA_TIMEOUT)
+            .await
+    }
+
+    /// Drop the override — back to what the TOML config says.
+    pub async fn reset_llm_settings(&self) -> Result<LlmSettings> {
+        self.send(self.http.delete(self.url("api/settings/llm")?), DATA_TIMEOUT)
+            .await
     }
 
     /// Kick off a background ad-hoc search; poll `search_progress`.

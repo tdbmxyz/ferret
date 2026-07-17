@@ -138,6 +138,7 @@ pub fn GuidedCreate() -> impl IntoView {
                     queries: vec![],
                     proposal: None,
                     via: "edit".into(),
+                    llm_active: true,
                 }));
             });
         });
@@ -377,6 +378,14 @@ fn confirmation_header(interp: &Interpretation) -> impl IntoView + use<> {
             <p>
                 <span class="badge warn">"unknown product"</span>
                 " — ferret drafted a new category for review:"
+            </p>
+        }
+        .into_any(),
+        (None, None) if !interp.llm_active => view! {
+            <p class="muted">
+                "No category matched, and no LLM is configured to interpret free text — \
+                 ferret only knows the categories in the Categories tab. Add one there, \
+                 or set up an LLM under ⚙ (or [llm] in ferret.toml)."
             </p>
         }
         .into_any(),

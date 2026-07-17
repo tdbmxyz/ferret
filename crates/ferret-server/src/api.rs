@@ -25,6 +25,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/categories", get(list_categories).post(upsert_category))
         .route("/api/categories/{slug}", axum::routing::delete(delete_category))
         .route("/api/interpret", axum::routing::post(interpret_text))
+        .route(
+            "/api/settings/llm",
+            get(get_llm_settings).put(put_llm_settings).delete(delete_llm_settings),
+        )
         .route("/api/searches", axum::routing::post(start_search))
         .route("/api/searches/{id}", get(search_progress))
         .with_state(state)
@@ -63,7 +67,8 @@ async fn status(State(state): State<AppState>) -> Result<Response, ApiError> {
     let mut sources: Vec<_> = state.statuses.read().await.values().cloned().collect();
     sources.sort_by(|a, b| a.source_id.cmp(&b.source_id));
     let watch_matches = state.db.count_matches().await?;
-    Ok(Json(ferret_domain::StatusResponse { sources, watch_matches }).into_response())
+    let llm = state.llm.read().await.status.clone();
+    Ok(Json(ferret_domain::StatusResponse { sources, watch_matches, llm }).into_response())
 }
 
 async fn list_watches(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -166,13 +171,67 @@ async fn interpret_text(
     Json(req): Json<InterpretRequest>,
 ) -> Result<Response, ApiError> {
     let categories = state.db.list_categories().await?;
+    let interpreter = state.llm.read().await.interpreter.clone();
     let out = crate::interpret::interpret(
         &req.text,
         &categories,
-        state.interpreter.as_deref(),
+        interpreter.as_deref(),
     )
     .await;
     Ok(Json(out).into_response())
+}
+
+// ---- LLM settings (TOML base + DB override, applied live) ----
+
+async fn get_llm_settings(State(state): State<AppState>) -> Response {
+    Json(state.llm.read().await.settings.clone()).into_response()
+}
+
+async fn put_llm_settings(
+    State(state): State<AppState>,
+    Json(update): Json<ferret_domain::LlmSettingsUpdate>,
+) -> Result<Response, ApiError> {
+    // `api_key: None` keeps the currently stored key; `Some("")` clears it
+    let api_key = match update.api_key {
+        Some(key) if key.is_empty() => None,
+        Some(key) => Some(key),
+        None => crate::llm::load_override(&state.db).await.and_then(|o| o.api_key),
+    };
+    let over = crate::llm::LlmOverride {
+        enabled: update.enabled,
+        base_url: update.base_url,
+        model: update.model,
+        api_key,
+    };
+    state
+        .db
+        .put_setting(
+            crate::llm::LLM_SETTINGS_KEY,
+            &serde_json::to_string(&over).expect("override serializes"),
+        )
+        .await?;
+    apply_llm(&state, Some(&over)).await
+}
+
+async fn delete_llm_settings(State(state): State<AppState>) -> Result<Response, ApiError> {
+    state.db.delete_setting(crate::llm::LLM_SETTINGS_KEY).await?;
+    apply_llm(&state, None).await
+}
+
+/// Rebuild the live LLM layer and answer with the new effective settings.
+async fn apply_llm(
+    state: &AppState,
+    over: Option<&crate::llm::LlmOverride>,
+) -> Result<Response, ApiError> {
+    match crate::llm::effective(&state.search.config.llm, over) {
+        Ok(eff) => {
+            let runtime = crate::llm::build_runtime(eff);
+            let settings = runtime.settings.clone();
+            *state.llm.write().await = runtime;
+            Ok(Json(settings).into_response())
+        }
+        Err(e) => Ok((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -227,7 +286,7 @@ mod tests {
             families: Arc::new(Vec::new()),
             notifier: Arc::new(crate::notify::NoopNotifier),
             statuses: Arc::new(tokio::sync::RwLock::new(Default::default())),
-            interpreter: None,
+            llm: Default::default(),
             search: Arc::new(crate::search::SearchContext {
                 config: crate::config::Config::default(),
                 families: Arc::new(vec![]),
@@ -321,7 +380,7 @@ mod tests {
             families: Arc::new(Vec::new()),
             notifier: Arc::new(crate::notify::NoopNotifier),
             statuses: Arc::new(tokio::sync::RwLock::new(Default::default())),
-            interpreter: None,
+            llm: Default::default(),
             search: Arc::new(crate::search::SearchContext {
                 config: crate::config::Config::default(),
                 families: Arc::new(vec![]),
@@ -343,6 +402,75 @@ mod tests {
         let prices: Vec<ferret_domain::PricePoint> = body_json(resp).await;
         assert_eq!(prices.len(), 1);
         assert_eq!(prices[0].price_cents, 45_000);
+    }
+
+    #[tokio::test]
+    async fn llm_settings_override_lifecycle() {
+        let app = app().await;
+
+        // default: config-disabled, no override
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/settings/llm").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let settings: ferret_domain::LlmSettings = body_json(resp).await;
+        assert!(!settings.enabled && !settings.from_override);
+
+        // enable via override, with a key
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put("/api/settings/llm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"enabled": true, "base_url": "http://ollama:11434/v1",
+                            "model": "qwen3", "api_key": "sk-test"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let settings: ferret_domain::LlmSettings = body_json(resp).await;
+        assert!(settings.enabled && settings.from_override && settings.api_key_set);
+        assert_eq!(settings.model, "qwen3");
+
+        // update without api_key keeps the stored key
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put("/api/settings/llm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"enabled": true, "base_url": "http://ollama:11434/v1", "model": "qwen3-big"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let settings: ferret_domain::LlmSettings = body_json(resp).await;
+        assert!(settings.api_key_set, "omitted api_key keeps the stored one");
+        assert_eq!(settings.model, "qwen3-big");
+
+        // /api/status reflects the live layer
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status: ferret_domain::StatusResponse = body_json(resp).await;
+        assert!(status.llm.enabled);
+        assert_eq!(status.llm.model.as_deref(), Some("qwen3-big"));
+
+        // back to TOML config
+        let resp = app
+            .clone()
+            .oneshot(Request::delete("/api/settings/llm").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let settings: ferret_domain::LlmSettings = body_json(resp).await;
+        assert!(!settings.enabled && !settings.from_override && !settings.api_key_set);
     }
 
     #[tokio::test]

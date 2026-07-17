@@ -54,6 +54,7 @@ pub async fn interpret(
     categories: &[Category],
     interpreter: Option<&dyn LlmInterpret>,
 ) -> Interpretation {
+    let llm_active = interpreter.is_some();
     // 1. instant heuristic
     if let Some((cat, constraints)) = category::interpret_heuristic(text, categories) {
         return Interpretation {
@@ -62,6 +63,7 @@ pub async fn interpret(
             constraints,
             proposal: None,
             via: "heuristic".into(),
+            llm_active,
         };
     }
     // 2. LLM mapping / proposal (fail-open)
@@ -78,6 +80,7 @@ pub async fn interpret(
         queries: queries_for(text, None),
         proposal: None,
         via: "none".into(),
+        llm_active,
     }
 }
 
@@ -110,6 +113,7 @@ fn from_llm(text: &str, categories: &[Category], answer: LlmInterpretation) -> I
         category,
         constraints,
         proposal,
+        llm_active: true,
     }
 }
 

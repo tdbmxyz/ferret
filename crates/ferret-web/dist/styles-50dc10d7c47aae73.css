@@ -12,10 +12,12 @@
   --bad: #e86a6a;
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; min-width: 0; }
 
-body {
+html, body {
   margin: 0;
+  max-width: 100%;
+  overflow-x: hidden; /* phone: no sideways-scrolling page, ever */
   background: var(--bg);
   color: var(--text);
   font: 15px/1.5 system-ui, sans-serif;
@@ -24,13 +26,22 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 1.5rem;
-  padding: 0.6rem 1rem;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
 }
+
+.topbar nav {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto; /* extra tabs scroll inside the bar, not the page */
+  scrollbar-width: none;
+}
+.topbar nav button { white-space: nowrap; }
+.brand { flex-shrink: 0; }
 
 .brand {
   font-weight: 700;
@@ -39,6 +50,8 @@ body {
 }
 
 .topbar nav { display: flex; gap: 0.5rem; }
+
+select, input { max-width: 100%; }
 
 .topbar button {
   background: none;
@@ -92,12 +105,13 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
 
 .deal-main, .watch-main {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: baseline;
-  gap: 1rem;
+  gap: 0.3rem 1rem;
 }
 
-.deal-main a { color: var(--text); text-decoration: none; }
+.deal-main a { color: var(--text); text-decoration: none; overflow-wrap: anywhere; }
 .deal-main a:hover { color: var(--accent); text-decoration: underline; }
 
 .price { font-weight: 700; color: var(--accent); white-space: nowrap; }
@@ -137,23 +151,29 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
 
 .watch-name { font-weight: 600; }
 
-.watch { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.watch { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem 1rem; }
 .watch-main { flex-direction: column; align-items: flex-start; gap: 0.1rem; }
 .watch-actions { display: flex; gap: 0.4rem; }
 
-.connect-toggle { margin-left: auto; }
+.connect-toggle { flex-shrink: 0; }
 
 .connect {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 0.8rem;
   padding: 0.6rem 1rem;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
 
-.connect input { min-width: 16rem; }
+.settings-block {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.settings-block input { flex: 1 1 12rem; }
+.settings-title { flex-basis: 100%; color: var(--muted); font-size: 0.9em; }
 
 .sources {
   display: flex;
@@ -168,8 +188,10 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
   display: flex;
   align-items: center;
   gap: 0.8rem;
+  flex-wrap: wrap;
   margin-top: 0.4rem;
 }
+.spark svg { max-width: 100%; height: auto; }
 
 .guided {
   background: var(--panel);
@@ -179,8 +201,8 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
   margin-bottom: 1rem;
 }
 
-.guided-input { display: flex; gap: 0.5rem; }
-.guided-text { flex: 1; }
+.guided-input { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.guided-text { flex: 1 1 10rem; }
 
 .guided-result { margin-top: 0.6rem; }
 
@@ -206,6 +228,27 @@ ul.deals, ul.watches { list-style: none; padding: 0; margin: 0; display: grid; g
 .narrow { width: 5.5rem; }
 
 .guided-save { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0; }
-.guided-save input { min-width: 8rem; }
+.guided-save input { flex: 1 1 8rem; }
 
 .preview { margin-top: 0.5rem; }
+
+/* category / spec editor */
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+}
+.editor-head, .spec-row, .editor-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.editor-head input, .spec-row input { flex: 1 1 8rem; }
+.editor-head input.wide, .spec-row input.wide { flex: 2 1 14rem; }
+.editor input.narrow, .spec-row select { flex: 0 1 auto; }
