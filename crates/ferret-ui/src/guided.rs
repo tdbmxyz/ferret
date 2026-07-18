@@ -440,9 +440,14 @@ fn spec_controls(category: Category, filters: RwSignal<FilterState>) -> impl Int
                         SpecKind::Number => {
                             let (kmin, kmax) = (key.clone(), key.clone());
                             let unit = spec.unit.clone().unwrap_or_default();
+                            let title = if unit.is_empty() {
+                                spec.label.clone()
+                            } else {
+                                format!("{} ({unit})", spec.label)
+                            };
                             view! {
                                 <label class="spec">
-                                    {format!("{} ({unit})", spec.label)}
+                                    {title}
                                     <input class="narrow" placeholder="min"
                                         prop:value=move || filters.with(|f| f.num_min.get(&kmin).cloned().unwrap_or_default())
                                         on:input={let k = key.clone(); move |ev| filters.update(|f| { f.num_min.insert(k.clone(), event_target_value(&ev)); })}/>

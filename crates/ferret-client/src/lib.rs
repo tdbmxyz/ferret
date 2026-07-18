@@ -178,6 +178,27 @@ impl FerretClient {
         Ok(())
     }
 
+    /// Ask the LLM to rework a category ("add an rpm spec"…). Returns the
+    /// revised draft — nothing is saved until the user does.
+    pub async fn revise_category(
+        &self,
+        category: &Category,
+        instruction: &str,
+    ) -> Result<Category> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            category: &'a Category,
+            instruction: &'a str,
+        }
+        self.send(
+            self.http
+                .post(self.url("api/categories/revise")?)
+                .json(&Body { category, instruction }),
+            Duration::from_secs(180),
+        )
+        .await
+    }
+
     /// What product is this text about? Instant for known categories, may
     /// take LLM latency otherwise.
     pub async fn interpret(&self, text: &str) -> Result<Interpretation> {
@@ -187,8 +208,8 @@ impl FerretClient {
         }
         self.send(
             self.http.post(self.url("api/interpret")?).json(&Body { text }),
-            // interpret may sit on an LLM call — give it more room
-            Duration::from_secs(60),
+            // interpret may sit on a slow local LLM — give it real room
+            Duration::from_secs(180),
         )
         .await
     }

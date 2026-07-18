@@ -19,7 +19,7 @@ fn to_filter(c: &LlmConstraint) -> Option<SpecFilter> {
     }
 }
 
-fn to_spec(s: &LlmProposalSpec) -> Option<ferret_domain::CategorySpec> {
+pub(crate) fn to_spec(s: &LlmProposalSpec) -> Option<ferret_domain::CategorySpec> {
     let kind = match s.kind.as_str() {
         "number" => SpecKind::Number,
         "enum" => SpecKind::Enum,
@@ -32,7 +32,7 @@ fn to_spec(s: &LlmProposalSpec) -> Option<ferret_domain::CategorySpec> {
         kind,
         unit: s.unit.clone(),
         allowed_values: s.allowed_values.clone(),
-        extraction_hint: None,
+        extraction_hint: s.extraction_hint.clone(),
     })
 }
 
@@ -235,6 +235,7 @@ mod tests {
                     kind: "number".into(),
                     unit: Some("bar".into()),
                     allowed_values: vec![],
+                    extraction_hint: None,
                 }],
             }),
         }));

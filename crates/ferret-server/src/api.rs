@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/families", get(list_families))
         .route("/api/categories", get(list_categories).post(upsert_category))
         .route("/api/categories/{slug}", axum::routing::delete(delete_category))
+        .route("/api/categories/revise", axum::routing::post(revise_category))
         .route("/api/interpret", axum::routing::post(interpret_text))
         .route(
             "/api/settings/llm",
@@ -161,6 +162,41 @@ async fn delete_category(
 ) -> Result<Response, ApiError> {
     state.db.delete_category(&slug).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct ReviseRequest {
+    category: ferret_domain::Category,
+    instruction: String,
+}
+
+/// Let the LLM rework a category draft ("add an rpm spec", "labels in
+/// French"…). Nothing is persisted — the revision loads into the editor
+/// for the user to review and save.
+async fn revise_category(
+    State(state): State<AppState>,
+    Json(req): Json<ReviseRequest>,
+) -> Response {
+    let Some(llm) = state.llm.read().await.interpreter.clone() else {
+        return (StatusCode::CONFLICT, "no LLM configured — set one under ⚙").into_response();
+    };
+    match llm.revise(&req.category, &req.instruction).await {
+        Ok(draft) => {
+            // the slug, origin, status and age of the category are not the
+            // LLM's to change
+            let revised = ferret_domain::Category {
+                slug: req.category.slug,
+                label: if draft.label.trim().is_empty() { req.category.label } else { draft.label },
+                aliases: draft.aliases,
+                origin: req.category.origin,
+                status: req.category.status,
+                specs: draft.specs.iter().filter_map(crate::interpret::to_spec).collect(),
+                created_at: req.category.created_at,
+            };
+            Json(revised).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
