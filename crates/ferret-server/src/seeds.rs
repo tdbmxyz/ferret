@@ -37,19 +37,19 @@ pub fn builtin(families: &[ProductFamily]) -> Vec<Category> {
             "hdd",
             "Hard drive",
             &["hdd", "disque dur", "hard drive", "ironwolf", "wd red", "barracuda", "exos", "nas"],
-            vec![spec_number("capacity", "Capacity (GB)", "GB"), spec_number("rpm", "Rotation speed", "rpm")],
+            vec![spec_number("capacity", "Capacity", "GB"), spec_number("rpm", "Rotation speed", "rpm")],
         ),
         category(
             "ssd",
             "SSD",
             &["ssd", "nvme", "m.2"],
-            vec![spec_number("capacity", "Capacity (GB)", "GB")],
+            vec![spec_number("capacity", "Capacity", "GB")],
         ),
         category(
             "ram",
             "RAM",
             &["ram", "ddr3", "ddr4", "ddr5", "dimm", "sodimm", "mémoire vive"],
-            vec![spec_number("capacity", "Capacity (GB)", "GB")],
+            vec![spec_number("capacity", "Capacity", "GB")],
         ),
     ];
     // each family table becomes a category with its model enum

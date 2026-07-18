@@ -99,6 +99,21 @@ impl Editor {
         }
     }
 
+    /// Load an LLM revision into the open editor (slug stays what it was).
+    fn load_revision(&self, category: &Category) {
+        self.label.set(category.label.clone());
+        self.aliases.set(category.aliases.join(", "));
+        let base = self.next_id.get_untracked();
+        let rows: Vec<SpecRow> = category
+            .specs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| SpecRow::new(base + i as u32, Some(s)))
+            .collect();
+        self.next_id.set(base + rows.len() as u32);
+        self.rows.set(rows);
+    }
+
     fn to_category(&self) -> Result<Category, String> {
         let slug = self.slug.get_untracked().trim().to_lowercase().replace(' ', "-");
         if slug.is_empty() {
@@ -174,6 +189,39 @@ fn editor_view(editor: Editor) -> impl IntoView {
     let slot: EditorSlot = expect_context();
     let error = RwSignal::new(None::<String>);
     let is_new = editor.original.is_none();
+    let instruction = RwSignal::new(String::new());
+    let asking = RwSignal::new(false);
+    let sync_shared = RwSignal::new(true);
+
+    let ask_llm = {
+        let client = client.clone();
+        let editor = editor.clone();
+        move |_| {
+            let text = instruction.get_untracked().trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            match editor.to_category() {
+                Ok(current) => {
+                    let client = client.clone();
+                    let editor = editor.clone();
+                    asking.set(true);
+                    error.set(None);
+                    spawn_local(async move {
+                        match client.revise_category(&current, &text).await {
+                            Ok(revised) => {
+                                editor.load_revision(&revised);
+                                instruction.set(String::new());
+                            }
+                            Err(e) => error.set(Some(e.to_string())),
+                        }
+                        asking.set(false);
+                    });
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        }
+    };
 
     let add_row = {
         let editor = editor.clone();
@@ -188,9 +236,13 @@ fn editor_view(editor: Editor) -> impl IntoView {
         move |_| match editor.to_category() {
             Ok(category) => {
                 let client = client.clone();
+                let sync = sync_shared.get_untracked();
                 spawn_local(async move {
                     match client.upsert_category(&category).await {
                         Ok(_) => {
+                            if sync {
+                                sync_shared_specs(&client, &category).await;
+                            }
                             slot.0.set(None);
                             version.0.update(|v| *v += 1);
                         }
@@ -218,15 +270,59 @@ fn editor_view(editor: Editor) -> impl IntoView {
                     prop:value=editor.aliases
                     on:input=move |ev| editor.aliases.set(event_target_value(&ev))/>
             </div>
+            <div class="editor-head">
+                <input class="wide"
+                    placeholder="ask the LLM to rework it — e.g. add an rpm spec, labels in French"
+                    prop:value=instruction
+                    on:input=move |ev| instruction.set(event_target_value(&ev))/>
+                <button on:click=ask_llm disabled=move || asking.get()>
+                    {move || if asking.get() { "Asking…" } else { "Ask LLM" }}
+                </button>
+            </div>
             <span class="muted">"Specs — the filters buyers get for this category:"</span>
             {move || rows.get().into_iter().map(|row| spec_row_view(row, rows)).collect_view()}
             <div class="editor-actions">
                 <button on:click=add_row>"+ spec"</button>
                 <button on:click=save>"Save category"</button>
                 <button on:click=move |_| slot.0.set(None)>"Cancel"</button>
+                <label class="spec" title="e.g. renaming 'capacity' here renames it in every category that has it">
+                    <input type="checkbox" prop:checked=sync_shared
+                        on:change=move |ev| sync_shared.set(event_target_checked(&ev))/>
+                    "propagate spec renames to other categories"
+                </label>
             </div>
             {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
         </div>
+    }
+}
+
+/// One "capacity" lives in hdd, ssd AND ram — after a save, mirror
+/// label/unit/hint edits onto same-key same-kind specs elsewhere so the
+/// user never repeats a rename per category. Values (enum lists) stay
+/// per-category.
+async fn sync_shared_specs(client: &FerretClient, saved: &Category) {
+    let Ok(all) = client.categories().await else { return };
+    for mut other in all {
+        if other.slug == saved.slug {
+            continue;
+        }
+        let mut changed = false;
+        for spec in &mut other.specs {
+            if let Some(edited) =
+                saved.specs.iter().find(|s| s.key == spec.key && s.kind == spec.kind)
+                && (spec.label != edited.label
+                    || spec.unit != edited.unit
+                    || spec.extraction_hint != edited.extraction_hint)
+            {
+                spec.label = edited.label.clone();
+                spec.unit = edited.unit.clone();
+                spec.extraction_hint = edited.extraction_hint.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = client.upsert_category(&other).await;
+        }
     }
 }
 

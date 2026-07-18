@@ -41,6 +41,7 @@ pub struct OpenAiRefiner {
     url: String,
     model: String,
     api_key: Option<String>,
+    timeout: Duration,
 }
 
 impl OpenAiRefiner {
@@ -54,6 +55,7 @@ impl OpenAiRefiner {
             url: format!("{}/chat/completions", eff.base_url.trim_end_matches('/')),
             model: eff.model.clone(),
             api_key: eff.api_key.clone(),
+            timeout: Duration::from_secs(eff.timeout_secs),
         }
     }
 }
@@ -186,6 +188,9 @@ pub(crate) fn request_body(model: &str, input: &RefineInput<'_>) -> serde_json::
     serde_json::json!({
         "model": model,
         "temperature": 0,
+        // ollama-style backends default to ~128 output tokens, which
+        // truncates any JSON answer into a parse error — always be explicit
+        "max_tokens": 600,
         "messages": [
             { "role": "system", "content":
                 "You review second-hand hardware marketplace listings. Given a listing whose \
@@ -216,6 +221,12 @@ pub(crate) fn content_of(body: &str) -> anyhow::Result<String> {
 /// Models love wrapping JSON in ```fences``` or prose despite instructions —
 /// cut the answer down to its outermost object before parsing.
 pub(crate) fn extract_json(content: &str) -> &str {
+    // reasoning models prepend <think>…</think>, which may itself contain
+    // braces — skip past it before hunting for the object
+    let content = match content.rfind("</think>") {
+        Some(i) => &content[i + "</think>".len()..],
+        None => content,
+    };
     match (content.find('{'), content.rfind('}')) {
         (Some(start), Some(end)) if end > start => &content[start..=end],
         _ => content,
@@ -230,8 +241,15 @@ pub(crate) fn parse_response(body: &str) -> anyhow::Result<Refinement> {
 }
 
 impl OpenAiRefiner {
-    async fn post_chat(&self, body: &serde_json::Value) -> anyhow::Result<String> {
+    async fn post_chat(
+        &self,
+        body: &serde_json::Value,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<String> {
         let mut request = self.http.post(&self.url).json(body);
+        if let Some(t) = timeout {
+            request = request.timeout(t);
+        }
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);
         }
@@ -245,30 +263,48 @@ impl OpenAiRefiner {
         content_of(&text)
     }
 
-    /// One chat call, resilient to backends that reject structured output:
-    /// a 4xx with `response_format` set retries once without it (the
-    /// prompts already demand a bare JSON object).
-    async fn chat(&self, mut body: serde_json::Value) -> anyhow::Result<String> {
-        match self.post_chat(&body).await {
-            Ok(content) => Ok(content),
-            Err(e)
-                if body.get("response_format").is_some()
-                    && e.to_string().starts_with('4') =>
-            {
-                tracing::debug!(error = %e, "structured output rejected — retrying plain");
-                body.as_object_mut().expect("chat body is an object").remove("response_format");
-                self.post_chat(&body).await
-            }
-            Err(e) => Err(e),
+    /// One structured chat call, resilient to backends that reject OR
+    /// silently mangle `response_format`: any failure (HTTP or parse) on
+    /// the structured attempt gets one plain retry — the prompts already
+    /// demand a bare JSON object.
+    async fn chat_json<T: serde::de::DeserializeOwned>(
+        &self,
+        mut body: serde_json::Value,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<T> {
+        fn parse<T: serde::de::DeserializeOwned>(content: &str) -> anyhow::Result<T> {
+            Ok(serde_json::from_str(extract_json(content))?)
         }
+        let first = match self.post_chat(&body, timeout).await {
+            Ok(content) => match parse(&content) {
+                Ok(v) => return Ok(v),
+                Err(e) => anyhow::anyhow!("{e} (content: {})", content.chars().take(120).collect::<String>()),
+            },
+            Err(e) => e,
+        };
+        if body.get("response_format").is_none() {
+            return Err(first);
+        }
+        tracing::debug!(error = %first, "structured output attempt failed — retrying plain");
+        body.as_object_mut().expect("chat body is an object").remove("response_format");
+        let content = self
+            .post_chat(&body, timeout)
+            .await
+            .map_err(|e| anyhow::anyhow!("{first}; plain retry: {e}"))?;
+        parse(&content).map_err(|e| anyhow::anyhow!("{first}; plain retry: {e}"))
+    }
+
+    /// Interprets/revisions generate a lot more than refinements — give
+    /// slow local models room regardless of a tight refine timeout.
+    fn long_timeout(&self) -> Option<Duration> {
+        Some(self.timeout.max(Duration::from_secs(120)))
     }
 }
 
 #[async_trait::async_trait]
 impl LlmRefiner for OpenAiRefiner {
     async fn refine(&self, input: &RefineInput<'_>) -> anyhow::Result<Refinement> {
-        let content = self.chat(request_body(&self.model, input)).await?;
-        Ok(serde_json::from_str(extract_json(&content))?)
+        self.chat_json(request_body(&self.model, input), None).await
     }
 }
 
@@ -369,6 +405,9 @@ pub struct LlmProposalSpec {
     pub unit: Option<String>,
     #[serde(default)]
     pub allowed_values: Vec<String>,
+    /// Boolean kind: title words that mean "yes".
+    #[serde(default)]
+    pub extraction_hint: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -380,9 +419,48 @@ pub trait LlmInterpret: Send + Sync {
         categories: &[ferret_domain::Category],
         web_context: &[String],
     ) -> anyhow::Result<LlmInterpretation>;
+
+    /// Rework a category per the user's instruction ("add an rpm spec",
+    /// "labels in French"…), returning the full revised draft.
+    async fn revise(
+        &self,
+        _category: &ferret_domain::Category,
+        _instruction: &str,
+    ) -> anyhow::Result<LlmProposal> {
+        anyhow::bail!("category revision is not supported by this backend")
+    }
+}
+
+/// The category shape shared by proposals (interpret) and revisions.
+fn proposal_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "slug": { "type": "string" },
+            "label": { "type": "string" },
+            "aliases": { "type": "array", "items": { "type": "string" } },
+            "specs": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string" },
+                    "label": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["number", "enum", "boolean"] },
+                    "unit": { "type": ["string", "null"] },
+                    "allowed_values": { "type": "array", "items": { "type": "string" } },
+                    "extraction_hint": { "type": ["string", "null"] }
+                },
+                "required": ["key", "label", "kind", "unit", "allowed_values", "extraction_hint"],
+                "additionalProperties": false
+            }}
+        },
+        "required": ["slug", "label", "aliases", "specs"],
+        "additionalProperties": false
+    })
 }
 
 fn interpret_schema() -> serde_json::Value {
+    let mut proposal = proposal_schema();
+    proposal["type"] = serde_json::json!(["object", "null"]);
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -397,25 +475,7 @@ fn interpret_schema() -> serde_json::Value {
                 "required": ["op", "key", "value"],
                 "additionalProperties": false
             }},
-            "proposal": { "type": ["object", "null"], "properties": {
-                "slug": { "type": "string" },
-                "label": { "type": "string" },
-                "aliases": { "type": "array", "items": { "type": "string" } },
-                "specs": { "type": "array", "items": {
-                    "type": "object",
-                    "properties": {
-                        "key": { "type": "string" },
-                        "label": { "type": "string" },
-                        "kind": { "type": "string", "enum": ["number", "enum", "boolean"] },
-                        "unit": { "type": ["string", "null"] },
-                        "allowed_values": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "required": ["key", "label", "kind", "unit", "allowed_values"],
-                    "additionalProperties": false
-                }}
-            },
-            "required": ["slug", "label", "aliases", "specs"],
-            "additionalProperties": false }
+            "proposal": proposal
         },
         "required": ["category_slug", "constraints", "proposal"],
         "additionalProperties": false
@@ -444,6 +504,8 @@ pub(crate) fn interpret_request_body(
     serde_json::json!({
         "model": model,
         "temperature": 0,
+        // explicit — ollama-style backends truncate at ~128 tokens otherwise
+        "max_tokens": 2000,
         "messages": [
             { "role": "system", "content":
                 "A user typed a product search into a second-hand deal tracker. Map it to ONE \
@@ -469,6 +531,49 @@ pub(crate) fn interpret_request_body(
     })
 }
 
+/// Serialize a category the way revision prompts want to see it.
+fn category_json(category: &ferret_domain::Category) -> serde_json::Value {
+    serde_json::json!({
+        "slug": category.slug,
+        "label": category.label,
+        "aliases": category.aliases,
+        "specs": category.specs.iter().map(|s| serde_json::json!({
+            "key": s.key, "label": s.label, "kind": s.kind, "unit": s.unit,
+            "allowed_values": s.allowed_values, "extraction_hint": s.extraction_hint,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+pub(crate) fn revise_request_body(
+    model: &str,
+    category: &ferret_domain::Category,
+    instruction: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 2000,
+        "messages": [
+            { "role": "system", "content":
+                "You maintain product category definitions for a second-hand deal \
+                 tracker. Given the current category (JSON) and the user's instruction, \
+                 answer with the FULL revised category object — apply the instruction \
+                 and keep everything else unchanged, including the slug. Specs are the \
+                 filters buyers get: kind \"number\" carries a unit, \"enum\" carries \
+                 allowed_values, \"boolean\" carries extraction_hint (title words that \
+                 mean yes). Answer only with the JSON object." },
+            { "role": "user", "content": serde_json::json!({
+                "category": category_json(category),
+                "instruction": instruction,
+            }).to_string() }
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": { "name": "category", "strict": true, "schema": proposal_schema() }
+        }
+    })
+}
+
 #[async_trait::async_trait]
 impl LlmInterpret for OpenAiRefiner {
     async fn interpret(
@@ -477,10 +582,23 @@ impl LlmInterpret for OpenAiRefiner {
         categories: &[ferret_domain::Category],
         web_context: &[String],
     ) -> anyhow::Result<LlmInterpretation> {
-        let content = self
-            .chat(interpret_request_body(&self.model, text, categories, web_context))
-            .await?;
-        Ok(serde_json::from_str(extract_json(&content))?)
+        self.chat_json(
+            interpret_request_body(&self.model, text, categories, web_context),
+            self.long_timeout(),
+        )
+        .await
+    }
+
+    async fn revise(
+        &self,
+        category: &ferret_domain::Category,
+        instruction: &str,
+    ) -> anyhow::Result<LlmProposal> {
+        self.chat_json(
+            revise_request_body(&self.model, category, instruction),
+            self.long_timeout(),
+        )
+        .await
     }
 }
 
@@ -519,6 +637,39 @@ mod tests {
         assert_eq!(extract_json("Sure! Here is it: {\"a\": {\"b\": 2}} hope it helps"),
             "{\"a\": {\"b\": 2}}");
         assert_eq!(extract_json("no json at all"), "no json at all");
+    }
+
+    #[test]
+    fn extract_json_skips_think_blocks() {
+        let content = "<think>Hmm {is it an hdd?} let me think</think>\n{\"a\": 1}";
+        assert_eq!(extract_json(content), "{\"a\": 1}");
+    }
+
+    #[test]
+    fn request_bodies_set_explicit_max_tokens() {
+        assert!(request_body("m", &input())["max_tokens"].as_u64().unwrap() >= 500);
+        assert!(
+            interpret_request_body("m", "x", &[], &[])["max_tokens"].as_u64().unwrap() >= 1000
+        );
+    }
+
+    #[test]
+    fn revise_request_carries_category_and_instruction() {
+        let category = ferret_domain::Category {
+            slug: "hdd".into(),
+            label: "Hard drive".into(),
+            aliases: vec!["hdd".into()],
+            origin: ferret_domain::CategoryOrigin::Curated,
+            status: ferret_domain::CategoryStatus::Active,
+            specs: vec![],
+            created_at: chrono::DateTime::UNIX_EPOCH,
+        };
+        let body = revise_request_body("qwen3", &category, "add an rpm spec");
+        let user = body["messages"][1]["content"].as_str().unwrap();
+        assert!(user.contains("\"slug\":\"hdd\""));
+        assert!(user.contains("add an rpm spec"));
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert!(body["max_tokens"].as_u64().unwrap() >= 1000);
     }
 
     #[test]
