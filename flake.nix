@@ -87,6 +87,9 @@
 
       cargoLock.lockFile = ./Cargo.lock;
 
+      # no .git in the sandbox — hand the commit to build.rs directly
+      GIT_COMMIT = self.shortRev or self.dirtyShortRev or "unknown";
+
       # Only the backend: the desktop crate would drag the webkit stack in.
       cargoBuildFlags = ["-p" "ferret-server"];
       cargoTestFlags = ["-p" "ferret-server"];
@@ -103,6 +106,8 @@
       src = self;
 
       cargoDeps = pkgs.rustPlatform.importCargoLock {lockFile = ./Cargo.lock;};
+
+      GIT_COMMIT = self.shortRev or self.dirtyShortRev or "unknown";
 
       nativeBuildInputs = [
         rustToolchain

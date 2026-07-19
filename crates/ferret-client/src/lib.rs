@@ -7,8 +7,9 @@
 use std::time::Duration;
 
 use ferret_domain::{
-    Category, Deal, HealthResponse, Interpretation, LlmProbeRequest, LlmProbeResult, LlmSettings,
-    LlmSettingsUpdate, PricePoint, ProductFamily, SearchJob, StatusResponse, Watch, WatchRequest,
+    Category, ChatTurn, Deal, HealthResponse, Interpretation, LlmProbeRequest, LlmProbeResult,
+    LlmSettings, LlmSettingsUpdate, PricePoint, ProductFamily, PromptSet, PromptsResponse,
+    SearchJob, StatusResponse, Watch, WatchRequest,
 };
 use serde::Serialize;
 use url::Url;
@@ -184,19 +185,37 @@ impl FerretClient {
         &self,
         category: &Category,
         instruction: &str,
+        history: &[ChatTurn],
     ) -> Result<Category> {
         #[derive(Serialize)]
         struct Body<'a> {
             category: &'a Category,
             instruction: &'a str,
+            history: &'a [ChatTurn],
         }
         self.send(
             self.http
                 .post(self.url("api/categories/revise")?)
-                .json(&Body { category, instruction }),
-            Duration::from_secs(180),
+                .json(&Body { category, instruction, history }),
+            Duration::from_secs(330),
         )
         .await
+    }
+
+    // ---- system prompts ----
+
+    pub async fn prompts(&self) -> Result<PromptsResponse> {
+        self.get("api/settings/prompts").await
+    }
+
+    pub async fn update_prompts(&self, set: &PromptSet) -> Result<PromptsResponse> {
+        self.send(self.http.put(self.url("api/settings/prompts")?).json(set), DATA_TIMEOUT)
+            .await
+    }
+
+    pub async fn reset_prompts(&self) -> Result<PromptsResponse> {
+        self.send(self.http.delete(self.url("api/settings/prompts")?), DATA_TIMEOUT)
+            .await
     }
 
     /// What product is this text about? Instant for known categories, may
@@ -209,7 +228,7 @@ impl FerretClient {
         self.send(
             self.http.post(self.url("api/interpret")?).json(&Body { text }),
             // interpret may sit on a slow local LLM — give it real room
-            Duration::from_secs(180),
+            Duration::from_secs(330),
         )
         .await
     }
@@ -246,7 +265,7 @@ impl FerretClient {
     pub async fn test_llm(&self, probe: &LlmProbeRequest) -> Result<LlmProbeResult> {
         self.send(
             self.http.post(self.url("api/settings/llm/test")?).json(probe),
-            Duration::from_secs(20),
+            Duration::from_secs(120),
         )
         .await
     }

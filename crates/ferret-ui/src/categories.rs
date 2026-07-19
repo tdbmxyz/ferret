@@ -192,6 +192,8 @@ fn editor_view(editor: Editor) -> impl IntoView {
     let instruction = RwSignal::new(String::new());
     let asking = RwSignal::new(false);
     let sync_shared = RwSignal::new(true);
+    // the revision conversation: every ask continues where the last ended
+    let chat = RwSignal::new(Vec::<ferret_domain::ChatTurn>::new());
 
     let ask_llm = {
         let client = client.clone();
@@ -208,8 +210,20 @@ fn editor_view(editor: Editor) -> impl IntoView {
                     asking.set(true);
                     error.set(None);
                     spawn_local(async move {
-                        match client.revise_category(&current, &text).await {
+                        let history = chat.get_untracked();
+                        match client.revise_category(&current, &text, &history).await {
                             Ok(revised) => {
+                                chat.update(|c| {
+                                    c.push(ferret_domain::ChatTurn {
+                                        role: "user".into(),
+                                        content: text.clone(),
+                                    });
+                                    c.push(ferret_domain::ChatTurn {
+                                        role: "assistant".into(),
+                                        content: serde_json::to_string(&revised)
+                                            .unwrap_or_default(),
+                                    });
+                                });
                                 editor.load_revision(&revised);
                                 instruction.set(String::new());
                             }
@@ -279,6 +293,19 @@ fn editor_view(editor: Editor) -> impl IntoView {
                     {move || if asking.get() { "Asking…" } else { "Ask LLM" }}
                 </button>
             </div>
+            {move || {
+                let asked: Vec<String> = chat
+                    .get()
+                    .iter()
+                    .filter(|t| t.role == "user")
+                    .map(|t| t.content.clone())
+                    .collect();
+                (!asked.is_empty()).then(|| view! {
+                    <span class="muted">
+                        {format!("conversation so far: {}", asked.join(" · "))}
+                    </span>
+                })
+            }}
             <span class="muted">"Specs — the filters buyers get for this category:"</span>
             {move || rows.get().into_iter().map(|row| spec_row_view(row, rows)).collect_view()}
             <div class="editor-actions">

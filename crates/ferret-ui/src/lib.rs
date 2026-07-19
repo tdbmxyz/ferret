@@ -2,6 +2,7 @@
 //! (trunk) and rendered inside the Tauri webview. Anything platform-specific
 //! (where the API lives) is injected from the outside via [`AppConfig`].
 
+mod about;
 mod categories;
 mod deals;
 mod guided;
@@ -26,6 +27,7 @@ enum Tab {
     Deals,
     Watches,
     Categories,
+    About,
 }
 
 /// Bumped after every mutation (watch created/updated/deleted) so list
@@ -88,6 +90,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                 {tab_button(Tab::Deals, "Deals")}
                 {tab_button(Tab::Watches, "Watches")}
                 {tab_button(Tab::Categories, "Categories")}
+                {tab_button(Tab::About, "About")}
             </nav>
             <button class="connect-toggle" title="server address"
                 on:click=move |_| show_connect.update(|s| *s = !*s)>
@@ -104,6 +107,7 @@ pub fn App(config: AppConfig) -> impl IntoView {
                     <span class="muted">"empty = back to automatic"</span>
                 </div>
                 <settings::LlmSettingsPanel/>
+                <settings::PromptsPanel/>
             </div>
         })}
         <main>
@@ -115,6 +119,9 @@ pub fn App(config: AppConfig) -> impl IntoView {
             </div>
             <div style:display=move || if tab.get() == Tab::Categories { "" } else { "none" }>
                 <categories::CategoriesView/>
+            </div>
+            <div style:display=move || if tab.get() == Tab::About { "" } else { "none" }>
+                <about::AboutView/>
             </div>
         </main>
     }
