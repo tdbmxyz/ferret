@@ -191,6 +191,7 @@ pub(crate) fn request_body(model: &str, input: &RefineInput<'_>) -> serde_json::
         // ollama-style backends default to ~128 output tokens, which
         // truncates any JSON answer into a parse error — always be explicit
         "max_tokens": 600,
+        "chat_template_kwargs": no_thinking(),
         "messages": [
             { "role": "system", "content":
                 "You review second-hand hardware marketplace listings. Given a listing whose \
@@ -212,10 +213,37 @@ pub(crate) fn request_body(model: &str, input: &RefineInput<'_>) -> serde_json::
 /// The assistant text of a chat-completions response body.
 pub(crate) fn content_of(body: &str) -> anyhow::Result<String> {
     let v: serde_json::Value = serde_json::from_str(body)?;
-    v["choices"][0]["message"]["content"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("no choices[0].message.content in llm response"))
+    let choice = &v["choices"][0];
+    if let Some(content) = choice["message"]["content"].as_str()
+        && !content.trim().is_empty()
+    {
+        return Ok(content.to_string());
+    }
+    // llama.cpp reasoning models put thoughts in reasoning_content; when
+    // the token budget runs out mid-think, content stays empty
+    if let Some(reasoning) = choice["message"]["reasoning_content"].as_str()
+        && !reasoning.trim().is_empty()
+    {
+        let finish = choice["finish_reason"].as_str().unwrap_or("?");
+        if finish == "stop" && reasoning.contains('{') {
+            // finished cleanly — the answer may simply live in there
+            return Ok(reasoning.to_string());
+        }
+        anyhow::bail!(
+            "the model spent its whole token budget reasoning without answering \
+             (finish_reason={finish}) — thinking should be disabled for this call"
+        );
+    }
+    anyhow::bail!("no choices[0].message.content in llm response")
+}
+
+/// Ask reasoning-capable models (Qwen3 family on llama.cpp/vllm) to skip
+/// the thinking phase: these calls want a small JSON object, and thoughts
+/// otherwise eat the whole `max_tokens` budget before the answer starts.
+/// Backends that reject the unknown field get a plain retry (see
+/// `chat_json`), the rest ignore it.
+fn no_thinking() -> serde_json::Value {
+    serde_json::json!({ "enable_thinking": false })
 }
 
 /// Models love wrapping JSON in ```fences``` or prose despite instructions —
@@ -282,11 +310,14 @@ impl OpenAiRefiner {
             },
             Err(e) => e,
         };
-        if body.get("response_format").is_none() {
+        if body.get("response_format").is_none() && body.get("chat_template_kwargs").is_none() {
             return Err(first);
         }
-        tracing::debug!(error = %first, "structured output attempt failed — retrying plain");
-        body.as_object_mut().expect("chat body is an object").remove("response_format");
+        tracing::debug!(error = %first, "structured attempt failed — retrying plain");
+        // strip everything a strict OpenAI-style backend might reject
+        let object = body.as_object_mut().expect("chat body is an object");
+        object.remove("response_format");
+        object.remove("chat_template_kwargs");
         let content = self
             .post_chat(&body, timeout)
             .await
@@ -348,7 +379,8 @@ pub async fn probe(base_url: &str, model: &str, api_key: Option<&str>) -> anyhow
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 20,
+        "max_tokens": 100,
+        "chat_template_kwargs": { "enable_thinking": false },
         "messages": [{ "role": "user", "content": "Reply with the single word: ok" }],
     });
     let mut request = probe_client(15).post(&url).json(&body);
@@ -506,6 +538,7 @@ pub(crate) fn interpret_request_body(
         "temperature": 0,
         // explicit — ollama-style backends truncate at ~128 tokens otherwise
         "max_tokens": 2000,
+        "chat_template_kwargs": no_thinking(),
         "messages": [
             { "role": "system", "content":
                 "A user typed a product search into a second-hand deal tracker. Map it to ONE \
@@ -553,6 +586,7 @@ pub(crate) fn revise_request_body(
         "model": model,
         "temperature": 0,
         "max_tokens": 2000,
+        "chat_template_kwargs": no_thinking(),
         "messages": [
             { "role": "system", "content":
                 "You maintain product category definitions for a second-hand deal \
@@ -651,6 +685,31 @@ mod tests {
         assert!(
             interpret_request_body("m", "x", &[], &[])["max_tokens"].as_u64().unwrap() >= 1000
         );
+    }
+
+    #[test]
+    fn request_bodies_disable_thinking() {
+        for body in [
+            request_body("m", &input()),
+            interpret_request_body("m", "x", &[], &[]),
+        ] {
+            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        }
+    }
+
+    #[test]
+    fn empty_content_with_reasoning_is_a_clear_error() {
+        // Qwen-style reasoning ate the whole budget (the real zeus failure)
+        let body = r#"{"choices": [{"finish_reason": "length", "message":
+            {"role": "assistant", "content": "", "reasoning_content": "Let me think..."}}]}"#;
+        let err = content_of(body).unwrap_err().to_string();
+        assert!(err.contains("token budget reasoning"), "got: {err}");
+        assert!(err.contains("finish_reason=length"), "got: {err}");
+
+        // finished cleanly but the answer hid in reasoning_content → salvaged
+        let body = r#"{"choices": [{"finish_reason": "stop", "message":
+            {"role": "assistant", "content": "", "reasoning_content": "here: {\"a\": 1}"}}]}"#;
+        assert!(content_of(body).unwrap().contains("{\"a\": 1}"));
     }
 
     #[test]
