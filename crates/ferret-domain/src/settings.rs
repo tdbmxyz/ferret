@@ -17,6 +17,33 @@ pub struct LlmSettings {
     pub from_override: bool,
 }
 
+/// The three system prompts driving the LLM calls. In override storage an
+/// empty field means "use the built-in default".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSet {
+    /// Listing review (genuine / stuffed-title / scam).
+    pub refine: String,
+    /// Free-text search → category + constraints / proposal.
+    pub interpret: String,
+    /// Category rework per user instruction.
+    pub revise: String,
+}
+
+/// `GET /api/settings/prompts` — what runs now, and the factory defaults
+/// (so the UI can offer a reset and show what changed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptsResponse {
+    pub current: PromptSet,
+    pub default: PromptSet,
+}
+
+/// One message of an LLM revision conversation (role "user"/"assistant").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
 /// Body of `POST /api/settings/llm/models` and `/test`: probe an endpoint
 /// with the values currently typed in the form. Missing fields fall back
 /// to the server's effective settings (including the stored API key).

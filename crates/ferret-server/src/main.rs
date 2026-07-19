@@ -52,10 +52,12 @@ async fn main() -> anyhow::Result<()> {
         None => Arc::new(NoopNotifier),
     };
 
-    // TOML base + DB override (editable from the UI, applied live)
+    // TOML base + DB overrides (editable from the UI, applied live)
     let llm_override = llm::load_override(&db).await;
+    let prompt_override = llm::load_prompts(&db).await;
     let llm_runtime = llm::build_runtime(
         llm::effective(&config.llm, llm_override.as_ref()).context("configuring llm")?,
+        llm::effective_prompts(prompt_override.as_ref()),
     );
     if llm_runtime.status.enabled {
         tracing::info!(

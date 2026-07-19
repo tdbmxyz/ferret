@@ -32,6 +32,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/settings/llm/models", axum::routing::post(list_llm_models))
         .route("/api/settings/llm/test", axum::routing::post(test_llm))
+        .route(
+            "/api/settings/prompts",
+            get(get_prompts).put(put_prompts).delete(delete_prompts),
+        )
         .route("/api/searches", axum::routing::post(start_search))
         .route("/api/searches/{id}", get(search_progress))
         .with_state(state)
@@ -41,6 +45,7 @@ async fn health() -> Response {
     Json(ferret_domain::HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
+        commit: Some(env!("FERRET_COMMIT").into()),
     })
     .into_response()
 }
@@ -168,6 +173,9 @@ async fn delete_category(
 struct ReviseRequest {
     category: ferret_domain::Category,
     instruction: String,
+    /// Earlier turns of this revision conversation.
+    #[serde(default)]
+    history: Vec<ferret_domain::ChatTurn>,
 }
 
 /// Let the LLM rework a category draft ("add an rpm spec", "labels in
@@ -180,7 +188,7 @@ async fn revise_category(
     let Some(llm) = state.llm.read().await.interpreter.clone() else {
         return (StatusCode::CONFLICT, "no LLM configured — set one under ⚙").into_response();
     };
-    match llm.revise(&req.category, &req.instruction).await {
+    match llm.revise(&req.category, &req.instruction, &req.history).await {
         Ok(draft) => {
             // the slug, origin, status and age of the category are not the
             // LLM's to change
@@ -314,12 +322,65 @@ async fn apply_llm(
 ) -> Result<Response, ApiError> {
     match crate::llm::effective(&state.search.config.llm, over) {
         Ok(eff) => {
-            let runtime = crate::llm::build_runtime(eff);
+            let prompts =
+                crate::llm::effective_prompts(crate::llm::load_prompts(&state.db).await.as_ref());
+            let runtime = crate::llm::build_runtime(eff, prompts);
             let settings = runtime.settings.clone();
             *state.llm.write().await = runtime;
             Ok(Json(settings).into_response())
         }
         Err(e) => Ok((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response()),
+    }
+}
+
+// ---- system prompt overrides ----
+
+async fn get_prompts(State(state): State<AppState>) -> Response {
+    let current =
+        crate::llm::effective_prompts(crate::llm::load_prompts(&state.db).await.as_ref());
+    Json(ferret_domain::PromptsResponse { current, default: crate::llm::default_prompts() })
+        .into_response()
+}
+
+async fn put_prompts(
+    State(state): State<AppState>,
+    Json(mut set): Json<ferret_domain::PromptSet>,
+) -> Result<Response, ApiError> {
+    // fields left at (or reset to) the default are stored empty, so future
+    // default improvements reach them
+    let defaults = crate::llm::default_prompts();
+    for (field, default) in [
+        (&mut set.refine, &defaults.refine),
+        (&mut set.interpret, &defaults.interpret),
+        (&mut set.revise, &defaults.revise),
+    ] {
+        if field.trim() == default.trim() {
+            field.clear();
+        }
+    }
+    state
+        .db
+        .put_setting(
+            crate::llm::PROMPTS_SETTINGS_KEY,
+            &serde_json::to_string(&set).expect("prompt set serializes"),
+        )
+        .await?;
+    rebuild_prompts(&state).await;
+    Ok(get_prompts(State(state)).await)
+}
+
+async fn delete_prompts(State(state): State<AppState>) -> Result<Response, ApiError> {
+    state.db.delete_setting(crate::llm::PROMPTS_SETTINGS_KEY).await?;
+    rebuild_prompts(&state).await;
+    Ok(get_prompts(State(state)).await)
+}
+
+async fn rebuild_prompts(state: &AppState) {
+    let over = crate::llm::load_override(&state.db).await;
+    if let Ok(eff) = crate::llm::effective(&state.search.config.llm, over.as_ref()) {
+        let prompts =
+            crate::llm::effective_prompts(crate::llm::load_prompts(&state.db).await.as_ref());
+        *state.llm.write().await = crate::llm::build_runtime(eff, prompts);
     }
 }
 
@@ -560,6 +621,46 @@ mod tests {
             .unwrap();
         let settings: ferret_domain::LlmSettings = body_json(resp).await;
         assert!(!settings.enabled && !settings.from_override && !settings.api_key_set);
+    }
+
+    #[tokio::test]
+    async fn prompt_override_lifecycle() {
+        let app = app().await;
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/settings/prompts").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let prompts: ferret_domain::PromptsResponse = body_json(resp).await;
+        assert_eq!(prompts.current, prompts.default, "starts at factory defaults");
+
+        // override one prompt, leave the others default (empty)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put("/api/settings/prompts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"refine": "", "interpret": "my custom interpret prompt", "revise": ""}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let prompts: ferret_domain::PromptsResponse = body_json(resp).await;
+        assert_eq!(prompts.current.interpret, "my custom interpret prompt");
+        assert_eq!(prompts.current.refine, prompts.default.refine, "untouched = default");
+
+        // reset
+        let resp = app
+            .clone()
+            .oneshot(Request::delete("/api/settings/prompts").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let prompts: ferret_domain::PromptsResponse = body_json(resp).await;
+        assert_eq!(prompts.current, prompts.default);
     }
 
     #[tokio::test]

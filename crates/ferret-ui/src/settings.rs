@@ -2,9 +2,110 @@
 //! the base; saving here stores a DB override that applies immediately.
 
 use ferret_client::FerretClient;
-use ferret_domain::{LlmProbeRequest, LlmSettings, LlmSettingsUpdate};
+use ferret_domain::{LlmProbeRequest, LlmSettings, LlmSettingsUpdate, PromptSet};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+
+/// The three LLM system prompts, editable with a reset to factory defaults.
+#[component]
+pub fn PromptsPanel() -> impl IntoView {
+    let client: FerretClient = expect_context();
+
+    let refine = RwSignal::new(String::new());
+    let interpret = RwSignal::new(String::new());
+    let revise = RwSignal::new(String::new());
+    let defaults = RwSignal::new(None::<PromptSet>);
+    let message = RwSignal::new(None::<String>);
+
+    let apply = move |current: PromptSet, def: PromptSet| {
+        refine.set(current.refine);
+        interpret.set(current.interpret);
+        revise.set(current.revise);
+        defaults.set(Some(def));
+    };
+
+    {
+        let client = client.clone();
+        spawn_local(async move {
+            match client.prompts().await {
+                Ok(r) => apply(r.current, r.default),
+                Err(e) => message.set(Some(format!("couldn't load prompts: {e}"))),
+            }
+        });
+    }
+
+    let save = {
+        let client = client.clone();
+        move |_| {
+            let set = PromptSet {
+                refine: refine.get_untracked(),
+                interpret: interpret.get_untracked(),
+                revise: revise.get_untracked(),
+            };
+            let client = client.clone();
+            spawn_local(async move {
+                match client.update_prompts(&set).await {
+                    Ok(r) => {
+                        apply(r.current, r.default);
+                        message.set(Some("prompts saved — applied immediately".into()));
+                    }
+                    Err(e) => message.set(Some(e.to_string())),
+                }
+            });
+        }
+    };
+    let reset = {
+        let client = client.clone();
+        move |_| {
+            let client = client.clone();
+            spawn_local(async move {
+                match client.reset_prompts().await {
+                    Ok(r) => {
+                        apply(r.current, r.default);
+                        message.set(Some("back to the default prompts".into()));
+                    }
+                    Err(e) => message.set(Some(e.to_string())),
+                }
+            });
+        }
+    };
+
+    let changed = move |value: RwSignal<String>, pick: fn(&PromptSet) -> &String| {
+        move || defaults.get().is_some_and(|d| value.get().trim() != pick(&d).trim())
+    };
+    let prompt_area = move |label: &'static str,
+                            hint: &'static str,
+                            value: RwSignal<String>,
+                            pick: fn(&PromptSet) -> &String| {
+        view! {
+            <label class="prompt-label">
+                {label} " " <span class="muted">{hint}</span>
+                {move || changed(value, pick)().then(|| view! {
+                    <span class="badge warn">"edited"</span>
+                })}
+            </label>
+            <textarea prop:value=value rows=5
+                on:input=move |ev| value.set(event_target_value(&ev))>
+            </textarea>
+        }
+    };
+
+    view! {
+        <div class="settings-block prompts">
+            <span class="settings-title">
+                "System prompts — how the LLM is instructed (empty or unchanged = default)"
+            </span>
+            {prompt_area("interpret", "(search text → category)", interpret, |d| &d.interpret)}
+            {prompt_area("revise", "(category rework instructions)", revise, |d| &d.revise)}
+            {prompt_area("refine", "(listing review: genuine/stuffed/scam)", refine, |d| &d.refine)}
+            <div class="editor-actions">
+                <button on:click=save>"Save prompts"</button>
+                <button on:click=reset>"Reset to defaults"</button>
+                {move || message.get().map(|m| view! { <span class="muted">{m}</span> })}
+            </div>
+        </div>
+    }
+}
 
 #[component]
 pub fn LlmSettingsPanel() -> impl IntoView {

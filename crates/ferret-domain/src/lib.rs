@@ -27,10 +27,17 @@ use serde::{Deserialize, Serialize};
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    /// Short git commit the server was built from ("unknown" when the
+    /// build had no git context).
+    #[serde(default)]
+    pub commit: Option<String>,
 }
 pub use deal::{Deal, DealStatus, Flag, LlmVerdict, PricePoint};
 pub use family::{FamilyMatch, ProductFamily};
 pub use listing::RawListing;
-pub use settings::{LlmProbeRequest, LlmProbeResult, LlmSettings, LlmSettingsUpdate};
+pub use settings::{
+    ChatTurn, LlmProbeRequest, LlmProbeResult, LlmSettings, LlmSettingsUpdate, PromptSet,
+    PromptsResponse,
+};
 pub use status::{LlmStatus, SearchJob, SourceProgress, SourceStatus, StatusResponse, TickStats};
 pub use watch::{Watch, WatchRequest};

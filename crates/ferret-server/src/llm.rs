@@ -42,10 +42,11 @@ pub struct OpenAiRefiner {
     model: String,
     api_key: Option<String>,
     timeout: Duration,
+    prompts: ferret_domain::PromptSet,
 }
 
 impl OpenAiRefiner {
-    fn from_effective(eff: &EffectiveLlm) -> Self {
+    fn from_effective(eff: &EffectiveLlm, prompts: ferret_domain::PromptSet) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(eff.timeout_secs))
@@ -56,6 +57,7 @@ impl OpenAiRefiner {
             model: eff.model.clone(),
             api_key: eff.api_key.clone(),
             timeout: Duration::from_secs(eff.timeout_secs),
+            prompts,
         }
     }
 }
@@ -136,8 +138,10 @@ pub struct LlmRuntime {
 
 pub type LlmHandle = std::sync::Arc<tokio::sync::RwLock<LlmRuntime>>;
 
-pub fn build_runtime(eff: EffectiveLlm) -> LlmRuntime {
-    let client = eff.enabled.then(|| std::sync::Arc::new(OpenAiRefiner::from_effective(&eff)));
+pub fn build_runtime(eff: EffectiveLlm, prompts: ferret_domain::PromptSet) -> LlmRuntime {
+    let client = eff
+        .enabled
+        .then(|| std::sync::Arc::new(OpenAiRefiner::from_effective(&eff, prompts)));
     LlmRuntime {
         refiner: client.clone().map(|c| c as std::sync::Arc<dyn LlmRefiner>),
         interpreter: client.map(|c| c as std::sync::Arc<dyn LlmInterpret>),
@@ -162,6 +166,69 @@ pub async fn load_override(db: &crate::db::Db) -> Option<LlmOverride> {
         .ok()
 }
 
+// ---- system prompts: defaults here, user-overridable via settings ----
+
+pub const REFINE_PROMPT: &str =
+    "You review second-hand hardware marketplace listings. Given a listing whose \
+     title mentions the models listed, decide: is it a genuine offer for one \
+     product (\"genuine\"), a title stuffed with sibling model names for search \
+     visibility or an accessory/bundle mentioning many models (\"stuffed-title\"), \
+     or a likely scam, e.g. an implausibly low price (\"scam\")? Also extract the \
+     storage/RAM capacity in decimal gigabytes and the condition when the title \
+     states them, else null. Answer only with the JSON object.";
+
+pub const INTERPRET_PROMPT: &str =
+    "A user typed a product search into a second-hand deal tracker. Map it to ONE \
+     of the known product categories (by slug) and derive spec constraints from the \
+     text using that category's spec keys (a quantity the user typed is a minimum: \
+     op \"min\"; a named variant is op \"eq\"). If NO known category fits, set \
+     category_slug to null and draft a `proposal`: a kebab-case slug, a short \
+     label, title words that identify the product (aliases), and 1-4 spec \
+     dimensions buyers filter on (kind number with a unit, enum with \
+     allowed_values, or boolean). `web_search_results`, when present, are \
+     snippets about the search — use them to identify what the product is. \
+     Answer only with the JSON object.";
+
+pub const REVISE_PROMPT: &str =
+    "You maintain product category definitions for a second-hand deal \
+     tracker. Given the current category (JSON) and the user's instruction, \
+     answer with the FULL revised category object — apply the instruction \
+     and keep everything else unchanged, including the slug. Specs are the \
+     filters buyers get: kind \"number\" carries a unit, \"enum\" carries \
+     allowed_values, \"boolean\" carries extraction_hint (title words that \
+     mean yes). Answer only with the JSON object.";
+
+pub fn default_prompts() -> ferret_domain::PromptSet {
+    ferret_domain::PromptSet {
+        refine: REFINE_PROMPT.into(),
+        interpret: INTERPRET_PROMPT.into(),
+        revise: REVISE_PROMPT.into(),
+    }
+}
+
+pub const PROMPTS_SETTINGS_KEY: &str = "prompts";
+
+/// Stored override merged over the defaults (empty field = default).
+pub fn effective_prompts(stored: Option<&ferret_domain::PromptSet>) -> ferret_domain::PromptSet {
+    let defaults = default_prompts();
+    let Some(stored) = stored else { return defaults };
+    let pick = |over: &str, def: String| {
+        if over.trim().is_empty() { def } else { over.trim().to_string() }
+    };
+    ferret_domain::PromptSet {
+        refine: pick(&stored.refine, defaults.refine),
+        interpret: pick(&stored.interpret, defaults.interpret),
+        revise: pick(&stored.revise, defaults.revise),
+    }
+}
+
+pub async fn load_prompts(db: &crate::db::Db) -> Option<ferret_domain::PromptSet> {
+    let raw = db.get_setting(PROMPTS_SETTINGS_KEY).await.ok()??;
+    serde_json::from_str(&raw)
+        .map_err(|e| tracing::warn!(error = %e, "ignoring corrupt prompt override"))
+        .ok()
+}
+
 /// The JSON schema the model must answer with (strict structured output).
 fn response_schema() -> serde_json::Value {
     serde_json::json!({
@@ -177,7 +244,11 @@ fn response_schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn request_body(model: &str, input: &RefineInput<'_>) -> serde_json::Value {
+pub(crate) fn request_body(
+    model: &str,
+    input: &RefineInput<'_>,
+    system: &str,
+) -> serde_json::Value {
     let listing = serde_json::json!({
         "title": input.title,
         "price": format!("{:.2} {}", input.price_cents as f64 / 100.0, input.currency),
@@ -188,19 +259,12 @@ pub(crate) fn request_body(model: &str, input: &RefineInput<'_>) -> serde_json::
     serde_json::json!({
         "model": model,
         "temperature": 0,
-        // ollama-style backends default to ~128 output tokens, which
-        // truncates any JSON answer into a parse error — always be explicit
-        "max_tokens": 600,
-        "chat_template_kwargs": no_thinking(),
+        // explicit budget with room for chain-of-thought: reasoning models
+        // think first and the thoughts count against max_tokens; ollama-style
+        // backends would otherwise cap at ~128 and truncate the JSON
+        "max_tokens": 4000,
         "messages": [
-            { "role": "system", "content":
-                "You review second-hand hardware marketplace listings. Given a listing whose \
-                 title mentions the models listed, decide: is it a genuine offer for one \
-                 product (\"genuine\"), a title stuffed with sibling model names for search \
-                 visibility or an accessory/bundle mentioning many models (\"stuffed-title\"), \
-                 or a likely scam, e.g. an implausibly low price (\"scam\")? Also extract the \
-                 storage/RAM capacity in decimal gigabytes and the condition when the title \
-                 states them, else null. Answer only with the JSON object." },
+            { "role": "system", "content": system },
             { "role": "user", "content": listing.to_string() }
         ],
         "response_format": {
@@ -237,14 +301,6 @@ pub(crate) fn content_of(body: &str) -> anyhow::Result<String> {
     anyhow::bail!("no choices[0].message.content in llm response")
 }
 
-/// Ask reasoning-capable models (Qwen3 family on llama.cpp/vllm) to skip
-/// the thinking phase: these calls want a small JSON object, and thoughts
-/// otherwise eat the whole `max_tokens` budget before the answer starts.
-/// Backends that reject the unknown field get a plain retry (see
-/// `chat_json`), the rest ignore it.
-fn no_thinking() -> serde_json::Value {
-    serde_json::json!({ "enable_thinking": false })
-}
 
 /// Models love wrapping JSON in ```fences``` or prose despite instructions —
 /// cut the answer down to its outermost object before parsing.
@@ -310,14 +366,11 @@ impl OpenAiRefiner {
             },
             Err(e) => e,
         };
-        if body.get("response_format").is_none() && body.get("chat_template_kwargs").is_none() {
+        if body.get("response_format").is_none() {
             return Err(first);
         }
         tracing::debug!(error = %first, "structured attempt failed — retrying plain");
-        // strip everything a strict OpenAI-style backend might reject
-        let object = body.as_object_mut().expect("chat body is an object");
-        object.remove("response_format");
-        object.remove("chat_template_kwargs");
+        body.as_object_mut().expect("chat body is an object").remove("response_format");
         let content = self
             .post_chat(&body, timeout)
             .await
@@ -328,14 +381,16 @@ impl OpenAiRefiner {
     /// Interprets/revisions generate a lot more than refinements — give
     /// slow local models room regardless of a tight refine timeout.
     fn long_timeout(&self) -> Option<Duration> {
-        Some(self.timeout.max(Duration::from_secs(120)))
+        // reasoning models think before answering — that's allowed (CoT
+        // helps quality), so the deadline must absorb the thinking phase
+        Some(self.timeout.max(Duration::from_secs(300)))
     }
 }
 
 #[async_trait::async_trait]
 impl LlmRefiner for OpenAiRefiner {
     async fn refine(&self, input: &RefineInput<'_>) -> anyhow::Result<Refinement> {
-        self.chat_json(request_body(&self.model, input), None).await
+        self.chat_json(request_body(&self.model, input, &self.prompts.refine), None).await
     }
 }
 
@@ -343,7 +398,7 @@ impl LlmRefiner for OpenAiRefiner {
 
 fn probe_client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs.min(15)))
+        .timeout(Duration::from_secs(timeout_secs.min(120)))
         .user_agent(concat!("ferret/", env!("CARGO_PKG_VERSION")))
         .build()
         .expect("building llm probe client")
@@ -379,11 +434,11 @@ pub async fn probe(base_url: &str, model: &str, api_key: Option<&str>) -> anyhow
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 100,
-        "chat_template_kwargs": { "enable_thinking": false },
+        "max_tokens": 2048,
         "messages": [{ "role": "user", "content": "Reply with the single word: ok" }],
     });
-    let mut request = probe_client(15).post(&url).json(&body);
+    // a reasoning model may think before its one-word answer
+    let mut request = probe_client(90).post(&url).json(&body);
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
@@ -453,11 +508,13 @@ pub trait LlmInterpret: Send + Sync {
     ) -> anyhow::Result<LlmInterpretation>;
 
     /// Rework a category per the user's instruction ("add an rpm spec",
-    /// "labels in French"…), returning the full revised draft.
+    /// "labels in French"…), returning the full revised draft. `history`
+    /// carries the earlier turns of this revision conversation.
     async fn revise(
         &self,
         _category: &ferret_domain::Category,
         _instruction: &str,
+        _history: &[ferret_domain::ChatTurn],
     ) -> anyhow::Result<LlmProposal> {
         anyhow::bail!("category revision is not supported by this backend")
     }
@@ -519,6 +576,7 @@ pub(crate) fn interpret_request_body(
     text: &str,
     categories: &[ferret_domain::Category],
     web_context: &[String],
+    system: &str,
 ) -> serde_json::Value {
     let known: Vec<serde_json::Value> = categories
         .iter()
@@ -537,20 +595,9 @@ pub(crate) fn interpret_request_body(
         "model": model,
         "temperature": 0,
         // explicit — ollama-style backends truncate at ~128 tokens otherwise
-        "max_tokens": 2000,
-        "chat_template_kwargs": no_thinking(),
+        "max_tokens": 8000,
         "messages": [
-            { "role": "system", "content":
-                "A user typed a product search into a second-hand deal tracker. Map it to ONE \
-                 of the known product categories (by slug) and derive spec constraints from the \
-                 text using that category's spec keys (a quantity the user typed is a minimum: \
-                 op \"min\"; a named variant is op \"eq\"). If NO known category fits, set \
-                 category_slug to null and draft a `proposal`: a kebab-case slug, a short \
-                 label, title words that identify the product (aliases), and 1-4 spec \
-                 dimensions buyers filter on (kind number with a unit, enum with \
-                 allowed_values, or boolean). `web_search_results`, when present, are \
-                 snippets about the search — use them to identify what the product is. \
-                 Answer only with the JSON object." },
+            { "role": "system", "content": system },
             { "role": "user", "content": serde_json::json!({
                 "search": text,
                 "known_categories": known,
@@ -581,26 +628,25 @@ pub(crate) fn revise_request_body(
     model: &str,
     category: &ferret_domain::Category,
     instruction: &str,
+    history: &[ferret_domain::ChatTurn],
+    system: &str,
 ) -> serde_json::Value {
+    // an ongoing conversation: earlier instructions and answers first, the
+    // current category + new instruction last
+    let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
+    for turn in history {
+        let role = if turn.role == "assistant" { "assistant" } else { "user" };
+        messages.push(serde_json::json!({ "role": role, "content": turn.content }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": serde_json::json!({
+        "category": category_json(category),
+        "instruction": instruction,
+    }).to_string() }));
     serde_json::json!({
         "model": model,
         "temperature": 0,
-        "max_tokens": 2000,
-        "chat_template_kwargs": no_thinking(),
-        "messages": [
-            { "role": "system", "content":
-                "You maintain product category definitions for a second-hand deal \
-                 tracker. Given the current category (JSON) and the user's instruction, \
-                 answer with the FULL revised category object — apply the instruction \
-                 and keep everything else unchanged, including the slug. Specs are the \
-                 filters buyers get: kind \"number\" carries a unit, \"enum\" carries \
-                 allowed_values, \"boolean\" carries extraction_hint (title words that \
-                 mean yes). Answer only with the JSON object." },
-            { "role": "user", "content": serde_json::json!({
-                "category": category_json(category),
-                "instruction": instruction,
-            }).to_string() }
-        ],
+        "max_tokens": 8000,
+        "messages": messages,
         "response_format": {
             "type": "json_schema",
             "json_schema": { "name": "category", "strict": true, "schema": proposal_schema() }
@@ -617,7 +663,13 @@ impl LlmInterpret for OpenAiRefiner {
         web_context: &[String],
     ) -> anyhow::Result<LlmInterpretation> {
         self.chat_json(
-            interpret_request_body(&self.model, text, categories, web_context),
+            interpret_request_body(
+                &self.model,
+                text,
+                categories,
+                web_context,
+                &self.prompts.interpret,
+            ),
             self.long_timeout(),
         )
         .await
@@ -627,9 +679,10 @@ impl LlmInterpret for OpenAiRefiner {
         &self,
         category: &ferret_domain::Category,
         instruction: &str,
+        history: &[ferret_domain::ChatTurn],
     ) -> anyhow::Result<LlmProposal> {
         self.chat_json(
-            revise_request_body(&self.model, category, instruction),
+            revise_request_body(&self.model, category, instruction, history, &self.prompts.revise),
             self.long_timeout(),
         )
         .await
@@ -681,19 +734,21 @@ mod tests {
 
     #[test]
     fn request_bodies_set_explicit_max_tokens() {
-        assert!(request_body("m", &input())["max_tokens"].as_u64().unwrap() >= 500);
+        assert!(request_body("m", &input(), REFINE_PROMPT)["max_tokens"].as_u64().unwrap() >= 500);
         assert!(
-            interpret_request_body("m", "x", &[], &[])["max_tokens"].as_u64().unwrap() >= 1000
+            interpret_request_body("m", "x", &[], &[], INTERPRET_PROMPT)["max_tokens"].as_u64().unwrap() >= 1000
         );
     }
 
     #[test]
-    fn request_bodies_disable_thinking() {
+    fn request_bodies_leave_thinking_enabled_with_room_for_it() {
+        // CoT is allowed — the budget must fit thoughts AND the answer
         for body in [
-            request_body("m", &input()),
-            interpret_request_body("m", "x", &[], &[]),
+            request_body("m", &input(), REFINE_PROMPT),
+            interpret_request_body("m", "x", &[], &[], INTERPRET_PROMPT),
         ] {
-            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+            assert!(body.get("chat_template_kwargs").is_none(), "thinking left on");
+            assert!(body["max_tokens"].as_u64().unwrap() >= 4000);
         }
     }
 
@@ -723,7 +778,7 @@ mod tests {
             specs: vec![],
             created_at: chrono::DateTime::UNIX_EPOCH,
         };
-        let body = revise_request_body("qwen3", &category, "add an rpm spec");
+        let body = revise_request_body("qwen3", &category, "add an rpm spec", &[], REVISE_PROMPT);
         let user = body["messages"][1]["content"].as_str().unwrap();
         assert!(user.contains("\"slug\":\"hdd\""));
         assert!(user.contains("add an rpm spec"));
@@ -750,6 +805,7 @@ mod tests {
             "RTX 3090",
             &[],
             &["NVIDIA GeForce RTX 3090 — a graphics card".into()],
+            INTERPRET_PROMPT,
         );
         let user = body["messages"][1]["content"].as_str().unwrap();
         assert!(user.contains("web_search_results"));
@@ -766,7 +822,7 @@ mod tests {
 
     #[test]
     fn request_carries_model_listing_and_strict_schema() {
-        let body = request_body("qwen3", &input());
+        let body = request_body("qwen3", &input(), REFINE_PROMPT);
         assert_eq!(body["model"], "qwen3");
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
@@ -779,7 +835,7 @@ mod tests {
     #[test]
     fn disabled_config_builds_no_refiner() {
         let eff = effective(&crate::config::LlmConfig::default(), None).unwrap();
-        let runtime = build_runtime(eff);
+        let runtime = build_runtime(eff, default_prompts());
         assert!(runtime.refiner.is_none() && runtime.interpreter.is_none());
         assert!(!runtime.status.enabled && runtime.status.model.is_none());
     }
@@ -803,7 +859,7 @@ mod tests {
         assert_eq!(eff.api_key.as_deref(), Some("sk-x"));
         assert!(eff.from_override && eff.override_key_set);
 
-        let runtime = build_runtime(eff);
+        let runtime = build_runtime(eff, default_prompts());
         assert!(runtime.refiner.is_some() && runtime.interpreter.is_some());
         assert_eq!(runtime.status.model.as_deref(), Some("conf-model"));
         assert!(runtime.settings.api_key_set && runtime.settings.from_override);

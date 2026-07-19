@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use ferret_client::FerretClient;
 use ferret_domain::{
-    Category, CategoryStatus, Interpretation, SearchJob, SourceProgress, SpecFilter, SpecKind,
-    Watch, WatchRequest,
+    Category, CategoryStatus, ChatTurn, Interpretation, SearchJob, SourceProgress, SpecFilter,
+    SpecKind, Watch, WatchRequest,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -113,6 +113,8 @@ pub fn GuidedCreate() -> impl IntoView {
     let job_id = RwSignal::new(None::<Uuid>);
     let job = RwSignal::new(None::<SearchJob>);
     let deals_tick = RwSignal::new(0u32);
+    // LLM conversation refining the drafted proposal (reset per search)
+    let revise_chat = RwSignal::new(Vec::<ChatTurn>::new());
 
     // an edit request loads the watch into the flow
     {
@@ -211,6 +213,7 @@ pub fn GuidedCreate() -> impl IntoView {
             busy.set(true);
             error.set(None);
             let client = client.clone();
+            revise_chat.set(Vec::new());
             spawn_local(async move {
                 match client.interpret(&query_text).await {
                     Ok(out) => {
@@ -269,6 +272,7 @@ pub fn GuidedCreate() -> impl IntoView {
         max_price.set(String::new());
         queries.set(String::new());
         filters.set(FilterState::default());
+        revise_chat.set(Vec::new());
         error.set(None);
     };
 
@@ -340,7 +344,9 @@ pub fn GuidedCreate() -> impl IntoView {
                         {interp.llm_error.clone().map(|e| view! {
                             <p class="error">{format!("LLM call failed: {e}")}</p>
                         })}
-                        {interp.proposal.clone().map(|p| proposal_card(p, approve_proposal.clone()))}
+                        {interp.proposal.clone().map(|p| {
+                            proposal_card(p, approve_proposal.clone(), interpretation, revise_chat)
+                        })}
                         {interp.category.clone().map(|category| view! {
                             <div>
                                 {spec_controls(category.clone(), filters)}
@@ -405,7 +411,10 @@ fn confirmation_header(interp: &Interpretation) -> impl IntoView + use<> {
 fn proposal_card(
     proposal: Category,
     approve: impl Fn(web_sys::MouseEvent) + Clone + 'static,
+    interpretation: RwSignal<Option<Interpretation>>,
+    chat: RwSignal<Vec<ChatTurn>>,
 ) -> impl IntoView {
+    let client: FerretClient = expect_context();
     let specs: Vec<String> = proposal
         .specs
         .iter()
@@ -418,11 +427,61 @@ fn proposal_card(
             format!("{} ({kind})", s.label)
         })
         .collect();
+
+    let instruction = RwSignal::new(String::new());
+    let asking = RwSignal::new(false);
+    let revise_error = RwSignal::new(None::<String>);
+    let ask = {
+        let proposal = proposal.clone();
+        move |_| {
+            let text = instruction.get_untracked().trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            let client = client.clone();
+            let current = proposal.clone();
+            asking.set(true);
+            revise_error.set(None);
+            spawn_local(async move {
+                let history = chat.get_untracked();
+                match client.revise_category(&current, &text, &history).await {
+                    Ok(revised) => {
+                        chat.update(|c| {
+                            c.push(ChatTurn { role: "user".into(), content: text.clone() });
+                            c.push(ChatTurn {
+                                role: "assistant".into(),
+                                content: serde_json::to_string(&revised).unwrap_or_default(),
+                            });
+                        });
+                        interpretation
+                            .update(|i| {
+                                if let Some(i) = i.as_mut() {
+                                    i.proposal = Some(revised);
+                                }
+                            });
+                    }
+                    Err(e) => revise_error.set(Some(e.to_string())),
+                }
+                asking.set(false);
+            });
+        }
+    };
+
     view! {
         <div class="proposal">
             <span class="watch-name">{proposal.label.clone()}</span>
             <span class="muted">{format!("aliases: {}", proposal.aliases.join(", "))}</span>
             <span class="muted">{format!("filters: {}", specs.join(" · "))}</span>
+            <div class="guided-input">
+                <input class="guided-text"
+                    placeholder="not quite right? tell the LLM — e.g. add a VRAM spec"
+                    prop:value=instruction
+                    on:input=move |ev| instruction.set(event_target_value(&ev))/>
+                <button on:click=ask disabled=move || asking.get()>
+                    {move || if asking.get() { "Asking…" } else { "Ask LLM" }}
+                </button>
+            </div>
+            {move || revise_error.get().map(|e| view! { <p class="error">{e}</p> })}
             <button on:click=approve>"Approve category & continue"</button>
         </div>
     }
