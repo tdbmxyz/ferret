@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use ferret_client::FerretClient;
-use ferret_domain::{Deal, DealStatus, Flag, LlmVerdict, Watch};
+use ferret_domain::{Deal, DealStatus, Flag, LlmVerdict, Moderation, Watch};
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use uuid::Uuid;
 
 use crate::{DataVersion, format_price};
@@ -32,12 +33,14 @@ pub fn DealsView() -> impl IntoView {
             async move { client.watches().await.unwrap_or_default() }
         }
     });
+    let show_hidden = RwSignal::new(false);
     let deals = LocalResource::new(move || {
         tick.track();
         version.0.track();
         let client = client.clone();
         let watch_id = filter.get();
-        async move { client.deals(watch_id).await }
+        let hidden = show_hidden.get();
+        async move { client.deals(watch_id, hidden).await }
     });
 
     view! {
@@ -63,10 +66,19 @@ pub fn DealsView() -> impl IntoView {
                         }}
                     </select>
                 </label>
+                " "
+                <label class="spec">
+                    <input type="checkbox" prop:checked=show_hidden
+                        on:change=move |ev| show_hidden.set(event_target_checked(&ev))/>
+                    "hidden only"
+                </label>
             </div>
             {move || match deals.get() {
                 None => view! { <p class="muted">"Loading…"</p> }.into_any(),
                 Some(Err(e)) => view! { <p class="error">{format!("server unreachable: {e}")}</p> }.into_any(),
+                Some(Ok(deals)) if deals.is_empty() && show_hidden.get() => {
+                    view! { <p class="muted">"Nothing dismissed or banned."</p> }.into_any()
+                }
                 Some(Ok(deals)) if deals.is_empty() => {
                     view! { <p class="muted">"No deals yet — they appear as sources are scraped."</p> }
                         .into_any()
@@ -119,6 +131,11 @@ fn DealCard(deal: Deal) -> impl IntoView {
     if gone {
         badges.push(("gone".into(), "muted"));
     }
+    match deal.moderation {
+        Moderation::Dismissed => badges.push(("dismissed".into(), "muted")),
+        Moderation::Banned => badges.push(("banned".into(), "bad")),
+        Moderation::None => {}
+    }
 
     let mut details: Vec<String> = vec![deal.source_id.clone()];
     if let Some(gb) = deal.capacity_gb {
@@ -158,6 +175,47 @@ fn DealCard(deal: Deal) -> impl IntoView {
                     }
                 })
             }}
+            {move || expanded.get().then(|| moderation_actions(deal_id, deal.moderation))}
         </li>
+    }
+}
+
+/// Dismiss / ban / restore buttons on an expanded card. Dismiss hides the
+/// listing until it disappears and is re-acquired; ban is forever.
+fn moderation_actions(deal_id: Uuid, current: Moderation) -> impl IntoView {
+    let client: FerretClient = expect_context();
+    let version: DataVersion = expect_context();
+    let set = move |moderation: Moderation| {
+        let client = client.clone();
+        move |ev: web_sys::MouseEvent| {
+            ev.stop_propagation();
+            let client = client.clone();
+            spawn_local(async move {
+                let _ = client.set_moderation(deal_id, moderation).await;
+                version.0.update(|v| *v += 1);
+            });
+        }
+    };
+    view! {
+        <div class="watch-actions deal-actions">
+            {(current != Moderation::Dismissed).then(|| view! {
+                <button title="hide — comes back if the listing disappears and is re-listed"
+                    on:click=set(Moderation::Dismissed)>
+                    "dismiss"
+                </button>
+            })}
+            {(current != Moderation::Banned).then(|| view! {
+                <button class="danger" title="never show or match this listing again"
+                    on:click=set(Moderation::Banned)>
+                    "ban"
+                </button>
+            })}
+            {(current != Moderation::None).then(|| view! {
+                <button title="restore — it can match watches again"
+                    on:click=set(Moderation::None)>
+                    "restore"
+                </button>
+            })}
+        </div>
     }
 }

@@ -20,7 +20,7 @@ pub async fn retro_match(
     let mut matched = 0u64;
     let mut best: Option<(i64, String)> = None;
     if watch.active {
-        for deal in db.list_deals(None).await? {
+        for deal in db.list_deals(None, false).await? {
             if deal.status != DealStatus::Active || !matching::watch_matches(watch, &deal) {
                 continue;
             }
@@ -97,6 +97,7 @@ mod tests {
             llm_reason: None,
             category: None,
             specs: Default::default(),
+            moderation: Default::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         }
@@ -136,7 +137,7 @@ mod tests {
         assert_eq!(best, Some(42_000));
 
         // matches visible immediately
-        assert_eq!(db.list_deals(Some(watch.id)).await.unwrap().len(), 2);
+        assert_eq!(db.list_deals(Some(watch.id), false).await.unwrap().len(), 2);
         // exactly ONE summary push, mentioning count and best price
         {
             let sent = notifier.sent.lock().unwrap();
@@ -146,7 +147,7 @@ mod tests {
         }
 
         // notified price is armed → later drop can re-notify
-        let deals = db.list_deals(Some(watch.id)).await.unwrap();
+        let deals = db.list_deals(Some(watch.id), false).await.unwrap();
         for d in &deals {
             assert!(db.notified_price(d.id, watch.id).await.unwrap().is_some());
         }

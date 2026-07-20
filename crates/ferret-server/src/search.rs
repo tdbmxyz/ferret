@@ -216,7 +216,7 @@ mod tests {
         assert!(matches!(job.sources["mock-bad"], SourceProgress::Error { .. }));
 
         // both deals exist and BOTH are active (no gone-marking)
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals.len(), 2);
         assert!(deals.iter().all(|d| d.status == ferret_domain::DealStatus::Active));
     }
