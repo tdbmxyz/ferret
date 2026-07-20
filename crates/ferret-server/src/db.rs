@@ -548,6 +548,7 @@ fn verdict_to_str(verdict: LlmVerdict) -> &'static str {
         LlmVerdict::Genuine => "genuine",
         LlmVerdict::StuffedTitle => "stuffed-title",
         LlmVerdict::Scam => "scam",
+        LlmVerdict::Irrelevant => "irrelevant",
     }
 }
 
@@ -556,6 +557,7 @@ fn verdict_from_str(s: &str) -> Result<LlmVerdict> {
         "genuine" => Ok(LlmVerdict::Genuine),
         "stuffed-title" => Ok(LlmVerdict::StuffedTitle),
         "scam" => Ok(LlmVerdict::Scam),
+        "irrelevant" => Ok(LlmVerdict::Irrelevant),
         other => Err(DbError::Corrupt(format!("bad llm verdict {other:?}"))),
     }
 }

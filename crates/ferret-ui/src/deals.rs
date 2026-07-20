@@ -120,12 +120,14 @@ fn DealCard(deal: Deal) -> impl IntoView {
         match flag {
             Flag::PossibleStuffing => badges.push(("possible stuffing".into(), "warn")),
             Flag::PriceOutlier => badges.push(("price outlier".into(), "warn")),
+            Flag::WantedAd => badges.push(("wanted ad".into(), "muted")),
         }
     }
     match deal.llm_verdict {
         Some(LlmVerdict::Genuine) => badges.push(("llm: genuine".into(), "ok")),
         Some(LlmVerdict::StuffedTitle) => badges.push(("llm: stuffed title".into(), "warn")),
         Some(LlmVerdict::Scam) => badges.push(("llm: scam".into(), "bad")),
+        Some(LlmVerdict::Irrelevant) => badges.push(("llm: not the product".into(), "muted")),
         None => {}
     }
     if gone {
