@@ -200,7 +200,7 @@ pub fn GuidedCreate() -> impl IntoView {
             min_price.track();
             max_price.track();
             let client = client.clone();
-            async move { client.deals(None).await.unwrap_or_default() }
+            async move { client.deals(None, false).await.unwrap_or_default() }
         }
     });
     let preview_matches = move || {

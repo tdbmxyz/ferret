@@ -196,6 +196,11 @@ impl Db {
                     "UPDATE deals SET title = ?, price_cents = ?, currency = ?, family = ?,
                      models = ?, capacity_gb = ?, condition = ?, stuffing_score = ?, flags = ?,
                      status = 'active',
+                     -- a dismissed listing that vanished and came back is
+                     -- re-acquired: give it a fresh chance (bans stick)
+                     moderation = CASE
+                         WHEN status = 'gone' AND moderation = 'dismissed' THEN 'none'
+                         ELSE moderation END,
                      llm_verdict = COALESCE(?, llm_verdict),
                      llm_reason = COALESCE(?, llm_reason),
                      category = ?, specs = ?,
@@ -228,6 +233,13 @@ impl Db {
                     id: stored.id,
                     first_seen: stored.first_seen,
                     status: DealStatus::Active,
+                    // mirror the SQL: re-acquired clears a dismissal, not a ban
+                    moderation: match (stored.status, stored.moderation) {
+                        (DealStatus::Gone, ferret_domain::Moderation::Dismissed) => {
+                            ferret_domain::Moderation::None
+                        }
+                        _ => stored.moderation,
+                    },
                     llm_verdict: deal.llm_verdict.or(stored.llm_verdict),
                     llm_reason: deal.llm_reason.clone().or(stored.llm_reason),
                     ..deal.clone()
@@ -319,20 +331,24 @@ impl Db {
 
     /// Deals, newest last_seen first; filtered to one watch's matches when
     /// `watch_id` is set.
-    pub async fn list_deals(&self, watch_id: Option<Uuid>) -> Result<Vec<Deal>> {
+    /// `hidden = false` (the default view) excludes moderated deals;
+    /// `hidden = true` lists ONLY dismissed/banned ones for review.
+    pub async fn list_deals(&self, watch_id: Option<Uuid>, hidden: bool) -> Result<Vec<Deal>> {
+        let filter =
+            if hidden { "d.moderation != 'none'" } else { "d.moderation = 'none'" };
         let rows = match watch_id {
             Some(w) => {
-                sqlx::query(
+                sqlx::query(&format!(
                     "SELECT d.* FROM deals d
                      JOIN deal_matches m ON m.deal_id = d.id
-                     WHERE m.watch_id = ? ORDER BY d.last_seen DESC",
-                )
+                     WHERE m.watch_id = ? AND {filter} ORDER BY d.last_seen DESC",
+                ))
                 .bind(w.to_string())
                 .fetch_all(&self.pool)
                 .await?
             }
             None => {
-                sqlx::query("SELECT * FROM deals ORDER BY last_seen DESC")
+                sqlx::query(&format!("SELECT d.* FROM deals d WHERE {filter} ORDER BY d.last_seen DESC"))
                     .fetch_all(&self.pool)
                     .await?
             }
@@ -396,6 +412,37 @@ impl Db {
         rows.iter()
             .map(|r| Ok((parse_uuid(&r.get::<String, _>("watch_id"))?, r.get::<i64, _>("n"))))
             .collect()
+    }
+
+    /// Set the user verdict. Dismissing/banning also drops the deal's
+    /// matches (counts and notified state go with them — a later re-match
+    /// is a fresh event); clearing back to none lets the next tick or a
+    /// watch re-save re-match it.
+    pub async fn set_moderation(
+        &self,
+        deal_id: Uuid,
+        moderation: ferret_domain::Moderation,
+    ) -> Result<()> {
+        let value = match moderation {
+            ferret_domain::Moderation::None => "none",
+            ferret_domain::Moderation::Dismissed => "dismissed",
+            ferret_domain::Moderation::Banned => "banned",
+        };
+        let result = sqlx::query("UPDATE deals SET moderation = ? WHERE id = ?")
+            .bind(value)
+            .bind(deal_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound);
+        }
+        if moderation != ferret_domain::Moderation::None {
+            sqlx::query("DELETE FROM deal_matches WHERE deal_id = ?")
+                .bind(deal_id.to_string())
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     // ---- settings ----
@@ -556,7 +603,14 @@ fn row_to_deal(row: &sqlx::sqlite::SqliteRow) -> Result<Deal> {
         .get::<Option<String>, _>("llm_verdict")
         .map(|s| verdict_from_str(&s))
         .transpose()?;
+    let moderation = match row.get::<String, _>("moderation").as_str() {
+        "none" => ferret_domain::Moderation::None,
+        "dismissed" => ferret_domain::Moderation::Dismissed,
+        "banned" => ferret_domain::Moderation::Banned,
+        other => return Err(DbError::Corrupt(format!("bad moderation {other:?}"))),
+    };
     Ok(Deal {
+        moderation,
         id: parse_uuid(&row.get::<String, _>("id"))?,
         source_id: row.get("source_id"),
         canonical_url: row.get("canonical_url"),
@@ -609,6 +663,7 @@ mod tests {
             llm_reason: None,
             category: None,
             specs: Default::default(),
+            moderation: Default::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         }
@@ -669,7 +724,7 @@ mod tests {
         let (_, outcome) = db.upsert_deal(&d3).await.unwrap();
         assert_eq!(outcome, UpsertOutcome::Unchanged);
 
-        assert_eq!(db.list_deals(None).await.unwrap().len(), 1);
+        assert_eq!(db.list_deals(None, false).await.unwrap().len(), 1);
         // price history: insert day + change day collapse to one row per
         // day — both writes happened today, latest wins
         let prices = db.deal_prices(stored.id).await.unwrap();
@@ -686,7 +741,7 @@ mod tests {
         // a tick that only saw /2 → /1 goes gone
         let seen: HashSet<String> = ["https://ex.com/2".to_string()].into();
         assert_eq!(db.mark_gone("src", &seen).await.unwrap(), 1);
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         let find = |id| deals.iter().find(|d| d.id == id).unwrap();
         assert_eq!(find(d1.id).status, DealStatus::Gone);
         assert_eq!(find(d2.id).status, DealStatus::Active);
@@ -744,7 +799,7 @@ mod tests {
         assert_eq!(updated.llm_reason.as_deref(), Some("looks fine"));
 
         // and it round-trips through list_deals
-        let listed = db.list_deals(None).await.unwrap();
+        let listed = db.list_deals(None, false).await.unwrap();
         assert_eq!(listed[0].llm_verdict, Some(LlmVerdict::Genuine));
     }
 
@@ -808,7 +863,58 @@ mod tests {
         assert!(db.insert_match(d.id, w.id).await.unwrap()); // new match
         assert!(!db.insert_match(d.id, w.id).await.unwrap()); // already known
 
-        let deals = db.list_deals(Some(w.id)).await.unwrap();
+        let deals = db.list_deals(Some(w.id), false).await.unwrap();
         assert_eq!(deals.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn moderation_hides_unmatches_and_clears_on_reacquire() {
+        let db = test_db().await;
+        let w = db
+            .create_watch(&WatchRequest {
+                name: "w".into(),
+                family: None,
+                model: None,
+                min_capacity_gb: None,
+                min_price_cents: None,
+                max_price_cents: None,
+                category: None,
+                spec_filters: vec![],
+                queries: vec![],
+                active: true,
+            })
+            .await
+            .unwrap();
+        let (d, _) = db.upsert_deal(&deal("https://ex.com/1", 45_000)).await.unwrap();
+        db.insert_match(d.id, w.id).await.unwrap();
+
+        // dismiss: hidden from the default view, matches dropped
+        db.set_moderation(d.id, ferret_domain::Moderation::Dismissed).await.unwrap();
+        assert!(db.list_deals(None, false).await.unwrap().is_empty());
+        assert!(db.list_deals(Some(w.id), false).await.unwrap().is_empty());
+        let hidden = db.list_deals(None, true).await.unwrap();
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].moderation, ferret_domain::Moderation::Dismissed);
+
+        // still-present listing: dismissal sticks through re-scrapes
+        let (d2, _) = db.upsert_deal(&deal("https://ex.com/1", 45_000)).await.unwrap();
+        assert_eq!(d2.moderation, ferret_domain::Moderation::Dismissed);
+
+        // gone, then re-acquired → the dismissal clears
+        db.mark_gone("src", &HashSet::new()).await.unwrap();
+        let (d3, _) = db.upsert_deal(&deal("https://ex.com/1", 45_000)).await.unwrap();
+        assert_eq!(d3.moderation, ferret_domain::Moderation::None, "re-acquired = fresh chance");
+        assert_eq!(db.list_deals(None, false).await.unwrap().len(), 1);
+
+        // a ban survives the same disappear/re-acquire cycle
+        db.set_moderation(d.id, ferret_domain::Moderation::Banned).await.unwrap();
+        db.mark_gone("src", &HashSet::new()).await.unwrap();
+        let (d4, _) = db.upsert_deal(&deal("https://ex.com/1", 45_000)).await.unwrap();
+        assert_eq!(d4.moderation, ferret_domain::Moderation::Banned, "bans are forever");
+        assert!(db.list_deals(None, false).await.unwrap().is_empty());
+        assert!(matches!(
+            db.set_moderation(uuid::Uuid::new_v4(), ferret_domain::Moderation::Banned).await,
+            Err(DbError::NotFound)
+        ));
     }
 }

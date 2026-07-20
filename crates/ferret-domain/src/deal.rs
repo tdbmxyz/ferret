@@ -26,6 +26,20 @@ pub enum DealStatus {
     Gone,
 }
 
+/// User verdict on a deal, orthogonal to its lifecycle status.
+/// Moderated deals never match watches and never notify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Moderation {
+    #[default]
+    None,
+    /// Hidden for now — clears automatically if the listing disappears
+    /// and is later re-acquired (it may be relevant again).
+    Dismissed,
+    /// Never show or match this listing again, ever.
+    Banned,
+}
+
 /// LLM relevance verdict for an ambiguous listing. A second, independent
 /// signal — heuristic flags are kept untouched next to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +92,9 @@ pub struct Deal {
     /// Spec values extracted per the category's spec definitions.
     #[serde(default)]
     pub specs: std::collections::HashMap<String, crate::category::SpecValue>,
+    /// User verdict: dismissed/banned deals are hidden and never match.
+    #[serde(default)]
+    pub moderation: Moderation,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
 }

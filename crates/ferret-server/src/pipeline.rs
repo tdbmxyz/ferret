@@ -113,6 +113,7 @@ pub async fn process_listings(
             llm_reason: None,
             category: deal_category,
             specs: deal_specs,
+            moderation: Default::default(),
             first_seen: now,
             last_seen: now,
         };
@@ -172,6 +173,10 @@ pub async fn process_listings(
         }
 
         // -- match watches + notify --
+        // user-moderated deals (dismissed/banned) never match or notify
+        if stored.moderation != ferret_domain::Moderation::None {
+            continue;
+        }
         for watch in &watches {
             if !matching::watch_matches(watch, &stored) {
                 continue;
@@ -359,7 +364,7 @@ mod tests {
         assert_eq!(stats.new_deals, 1);
         assert_eq!(stats.notified, 1);
 
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals.len(), 1);
         assert_eq!(deals[0].canonical_url, "https://ex.com/1"); // tracking stripped
         assert_eq!(deals[0].price_cents, 45_000);
@@ -406,7 +411,7 @@ mod tests {
         }
 
         // price history recorded every change
-        let deal_id = db.list_deals(None).await.unwrap()[0].id;
+        let deal_id = db.list_deals(None, false).await.unwrap()[0].id;
         let prices = db.deal_prices(deal_id).await.unwrap();
         assert_eq!(prices.last().unwrap().price_cents, 40_500);
     }
@@ -419,14 +424,14 @@ mod tests {
         // next tick: the listing is no longer published
         let stats = run(&db, vec![], &notifier).await;
         assert_eq!(stats.gone, 1);
-        assert_eq!(db.list_deals(None).await.unwrap()[0].status, DealStatus::Gone);
+        assert_eq!(db.list_deals(None, false).await.unwrap()[0].status, DealStatus::Gone);
 
         // it reappears → revived, no duplicate notification
         let stats = run(&db, vec![listing("RTX 3080 FE", "450 €", "https://ex.com/1")], &notifier)
             .await;
         assert_eq!(stats.gone, 0);
         assert_eq!(stats.notified, 0);
-        assert_eq!(db.list_deals(None).await.unwrap()[0].status, DealStatus::Active);
+        assert_eq!(db.list_deals(None, false).await.unwrap()[0].status, DealStatus::Active);
     }
 
     #[tokio::test]
@@ -443,7 +448,7 @@ mod tests {
         )
         .await;
 
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals.len(), 1);
         assert!(deals[0].flags.contains(&ferret_domain::Flag::PossibleStuffing));
         // still notified — stuffing is a signal, not a filter
@@ -472,7 +477,7 @@ mod tests {
 
         assert_eq!(stats.refined, 1);
         assert_eq!(refiner.calls(), 1);
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::StuffedTitle));
         assert_eq!(deals[0].llm_reason.as_deref(), Some("accessory listing"));
         assert_eq!(deals[0].capacity_gb, Some(10), "empty capacity filled by LLM");
@@ -499,7 +504,7 @@ mod tests {
         )
         .await;
 
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals[0].condition.as_deref(), Some("used"), "heuristic wins");
         assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::Genuine));
     }
@@ -518,7 +523,7 @@ mod tests {
 
         assert_eq!(stats.refined, 0);
         assert_eq!(refiner.calls(), 1);
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals.len(), 1, "deal persisted despite LLM failure");
         assert_eq!(deals[0].llm_verdict, None);
         // heuristic pipeline unaffected: match + notification still fired
@@ -565,7 +570,7 @@ mod tests {
         assert_eq!(refiner.calls(), 1, "only the first sighting is refined");
         assert_eq!(stats.refined, 0);
         // stored verdict survives the re-scrape
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::StuffedTitle));
     }
 
@@ -579,7 +584,7 @@ mod tests {
             &notifier,
         )
         .await;
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals[0].category.as_deref(), Some("hdd"));
         assert_eq!(
             deals[0].specs.get("capacity"),
@@ -598,7 +603,7 @@ mod tests {
             run(&db, vec![listing("RTX 3080", "Contact seller", "https://ex.com/1")], &notifier)
                 .await;
         assert_eq!(stats.skipped, 1);
-        assert!(db.list_deals(None).await.unwrap().is_empty());
+        assert!(db.list_deals(None, false).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -611,7 +616,7 @@ mod tests {
         run(&db, vec![listing("RTX 3080 cheap!!", "100 €", "https://ex.com/scam")], &notifier)
             .await;
 
-        let deals = db.list_deals(None).await.unwrap();
+        let deals = db.list_deals(None, false).await.unwrap();
         assert!(deals[0].flags.contains(&ferret_domain::Flag::PriceOutlier));
     }
 }

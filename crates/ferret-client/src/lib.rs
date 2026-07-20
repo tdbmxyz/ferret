@@ -134,11 +134,43 @@ impl FerretClient {
     // ---- deals ----
 
     /// All deals, or one watch's matches when `watch_id` is set.
-    pub async fn deals(&self, watch_id: Option<Uuid>) -> Result<Vec<Deal>> {
-        match watch_id {
-            Some(id) => self.get(&format!("api/deals?watch_id={id}")).await,
-            None => self.get("api/deals").await,
+    /// `hidden = true` lists ONLY dismissed/banned deals (review view).
+    pub async fn deals(&self, watch_id: Option<Uuid>, hidden: bool) -> Result<Vec<Deal>> {
+        let path = match (watch_id, hidden) {
+            (Some(id), h) => format!("api/deals?watch_id={id}&hidden={h}"),
+            (None, true) => "api/deals?hidden=true".into(),
+            (None, false) => "api/deals".into(),
+        };
+        self.get(&path).await
+    }
+
+    /// Set the user verdict on a deal (dismiss / ban / restore to none).
+    pub async fn set_moderation(
+        &self,
+        deal_id: Uuid,
+        moderation: ferret_domain::Moderation,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body {
+            moderation: ferret_domain::Moderation,
         }
+        let request = self
+            .http
+            .put(self.url(&format!("api/deals/{deal_id}/moderation"))?)
+            .json(&Body { moderation });
+        let mut request = request.build().map_err(|e| ClientError::Transport(e.to_string()))?;
+        *request.timeout_mut() = Some(DATA_TIMEOUT);
+        let response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response.text().await.unwrap_or_default();
+            return Err(ClientError::Api { status, message });
+        }
+        Ok(())
     }
 
     pub async fn deal_prices(&self, deal_id: Uuid) -> Result<Vec<PricePoint>> {

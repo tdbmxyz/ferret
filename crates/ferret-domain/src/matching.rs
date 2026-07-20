@@ -72,6 +72,7 @@ mod tests {
             llm_reason: None,
             category: None,
             specs: Default::default(),
+            moderation: Default::default(),
             first_seen: DateTime::UNIX_EPOCH,
             last_seen: DateTime::UNIX_EPOCH,
         }

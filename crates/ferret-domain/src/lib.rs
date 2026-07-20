@@ -32,7 +32,7 @@ pub struct HealthResponse {
     #[serde(default)]
     pub commit: Option<String>,
 }
-pub use deal::{Deal, DealStatus, Flag, LlmVerdict, PricePoint};
+pub use deal::{Deal, DealStatus, Flag, LlmVerdict, Moderation, PricePoint};
 pub use family::{FamilyMatch, ProductFamily};
 pub use listing::RawListing;
 pub use settings::{

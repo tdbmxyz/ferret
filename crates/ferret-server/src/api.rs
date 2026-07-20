@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/watches/{id}", axum::routing::put(update_watch).delete(delete_watch))
         .route("/api/deals", get(list_deals))
         .route("/api/deals/{id}/prices", get(deal_prices))
+        .route("/api/deals/{id}/moderation", axum::routing::put(set_moderation))
         .route("/api/families", get(list_families))
         .route("/api/categories", get(list_categories).post(upsert_category))
         .route("/api/categories/{slug}", axum::routing::delete(delete_category))
@@ -131,13 +132,32 @@ async fn delete_watch(
 #[derive(Deserialize)]
 struct DealsQuery {
     watch_id: Option<Uuid>,
+    /// true → list ONLY dismissed/banned deals (the review view).
+    #[serde(default)]
+    hidden: bool,
 }
 
 async fn list_deals(
     State(state): State<AppState>,
     Query(q): Query<DealsQuery>,
 ) -> Result<Response, ApiError> {
-    Ok(Json(state.db.list_deals(q.watch_id).await?).into_response())
+    Ok(Json(state.db.list_deals(q.watch_id, q.hidden).await?).into_response())
+}
+
+#[derive(Deserialize)]
+struct ModerationRequest {
+    moderation: ferret_domain::Moderation,
+}
+
+/// User verdict on a deal: dismiss (back if re-acquired), ban (forever),
+/// or none (restore). Dismiss/ban also drop the deal's watch matches.
+async fn set_moderation(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ModerationRequest>,
+) -> Result<Response, ApiError> {
+    state.db.set_moderation(id, req.moderation).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn deal_prices(
@@ -527,6 +547,7 @@ mod tests {
             llm_reason: None,
             category: None,
             specs: Default::default(),
+            moderation: Default::default(),
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
         };
