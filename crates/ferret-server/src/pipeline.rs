@@ -88,6 +88,9 @@ pub async fn process_listings(
         if fam.models.len() >= 2 && fam.stuffing_score >= scrape.stuffing_threshold {
             flags.push(Flag::PossibleStuffing);
         }
+        if normalize::is_wanted_ad(&title) {
+            flags.push(Flag::WantedAd);
+        }
         // outlier check needs an unambiguous (family, model) identity
         if let (Some(family_name), [model]) = (&fam.family, fam.models.as_slice()) {
             let history = db.recent_prices(family_name, model, PRICE_WINDOW).await?;
@@ -260,9 +263,13 @@ pub async fn process_listings(
 /// (LLM off or failed) the possible-stuffing heuristic suppresses it.
 /// Suppressed matches stay visible in the UI with their badges.
 fn notification_worthy(deal: &Deal) -> bool {
+    // a buy request is never a deal, whatever the LLM thinks
+    if deal.flags.contains(&Flag::WantedAd) {
+        return false;
+    }
     match deal.llm_verdict {
-        Some(ferret_domain::LlmVerdict::StuffedTitle | ferret_domain::LlmVerdict::Scam) => false,
         Some(ferret_domain::LlmVerdict::Genuine) => true,
+        Some(_) => false, // stuffed-title, scam, irrelevant
         None => !deal.flags.contains(&Flag::PossibleStuffing),
     }
 }
@@ -497,6 +504,18 @@ mod tests {
     /// The single test watch's id (setup creates exactly one).
     async fn only_watch(db: &Db) -> Option<uuid::Uuid> {
         Some(db.list_watches().await.unwrap()[0].id)
+    }
+
+    #[tokio::test]
+    async fn wanted_ads_never_notify() {
+        let (db, notifier) = setup().await;
+        let stats =
+            run(&db, vec![listing("Recherche RTX 3080", "450 €", "https://ex.com/w")], &notifier)
+                .await;
+        let deals = db.list_deals(None, false).await.unwrap();
+        assert!(deals[0].flags.contains(&ferret_domain::Flag::WantedAd));
+        assert_eq!(notifier.sent.lock().unwrap().len(), 0, "a buy request is not a deal");
+        assert_eq!(stats.suppressed, 1, "match recorded silently");
     }
 
     #[tokio::test]

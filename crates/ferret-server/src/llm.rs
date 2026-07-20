@@ -201,13 +201,24 @@ pub async fn load_override(db: &crate::db::Db) -> Option<LlmOverride> {
 // ---- system prompts: defaults here, user-overridable via settings ----
 
 pub const REFINE_PROMPT: &str =
-    "You review second-hand hardware marketplace listings. Given a listing whose \
-     title mentions the models listed, decide: is it a genuine offer for one \
-     product (\"genuine\"), a title stuffed with sibling model names for search \
-     visibility or an accessory/bundle mentioning many models (\"stuffed-title\"), \
-     or a likely scam, e.g. an implausibly low price (\"scam\")? Also extract the \
-     storage/RAM capacity in decimal gigabytes and the condition when the title \
-     states them, else null. Answer only with the JSON object.";
+    "You review second-hand marketplace listings for a deal tracker. The user \
+     tracks the product family given, and only wants alerts for real chances to \
+     buy the working product itself. Classify the listing:\n\
+     - \"genuine\": an offer to sell the working product as the listing's MAIN \
+       item (a graphics card listing for a graphics card watch).\n\
+     - \"irrelevant\": anything else being sold or asked — a complete PC, laptop \
+       or prebuilt that merely CONTAINS the product; an accessory (waterblock, \
+       cable, bracket, fan); an empty box (\"carton\"); a defective/for-parts \
+       unit (\"HS\", \"pour pièces\", \"sans gpu\"); a buy request \
+       (\"recherche\", \"achat\"); or a different product sharing the model \
+       number.\n\
+     - \"stuffed-title\": a title enumerating several sibling models for search \
+       visibility.\n\
+     - \"scam\": fraud signals — e.g. an implausibly low price for a supposedly \
+       working unit.\n\
+     Also extract the storage/RAM capacity in decimal gigabytes and the \
+     condition (new/used/refurbished) when the title states them, else null. \
+     Answer only with the JSON object.";
 
 pub const INTERPRET_PROMPT: &str =
     "A user typed a product search into a second-hand deal tracker. Map it to ONE \
@@ -266,7 +277,7 @@ fn response_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "verdict": { "type": "string", "enum": ["genuine", "stuffed-title", "scam"] },
+            "verdict": { "type": "string", "enum": ["genuine", "stuffed-title", "scam", "irrelevant"] },
             "reason": { "type": "string" },
             "capacity_gb": { "type": ["integer", "null"] },
             "condition": { "type": ["string", "null"], "enum": ["new", "used", "refurbished", null] }

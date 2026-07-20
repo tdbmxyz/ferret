@@ -71,6 +71,17 @@ pub fn canonical_url(raw: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+static WANTED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // buy requests, French marketplace style: the intent word leads the title
+    Regex::new(r"(?i)^\W*(je\s+)?(recherche|cherche|rech\.?|achat|ach[eè]te)\b").unwrap()
+});
+
+/// True when the title is a buy request ("Recherche RTX 5090"), not an
+/// offer — matched on the leading words only to avoid false positives.
+pub fn is_wanted_ad(title: &str) -> bool {
+    WANTED_RE.is_match(title)
+}
+
 /// Collapse all whitespace runs (including nbsp) to single spaces and trim.
 pub fn clean_title(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -96,6 +107,18 @@ mod tests {
     #[test]
     fn parses_bare_integer_price() {
         assert_eq!(parse_price("120 €"), Some((12_000, "EUR".into())));
+    }
+
+    #[test]
+    fn wanted_ads_are_detected_by_leading_intent_words() {
+        assert!(is_wanted_ad("Recherche RTX 5090"));
+        assert!(is_wanted_ad("recherche rtx 5090 sous garantie"));
+        assert!(is_wanted_ad("Je cherche une RTX 4090"));
+        assert!(is_wanted_ad("ACHAT rtx 3090"));
+        assert!(is_wanted_ad("Achète carte graphique"));
+        // selling listings that merely contain the words elsewhere
+        assert!(!is_wanted_ad("RTX 4090 état neuf, recherche nouveau proprio"));
+        assert!(!is_wanted_ad("PC gamer rtx 5090"));
     }
 
     #[test]

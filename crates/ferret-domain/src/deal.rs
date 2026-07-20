@@ -13,6 +13,8 @@ pub enum Flag {
     PossibleStuffing,
     /// Price is far below the rolling median for this family+model.
     PriceOutlier,
+    /// A buy request ("Recherche RTX 5090"), not an offer to sell.
+    WantedAd,
 }
 
 /// Lifecycle of a deal on its source. A deal is never deleted: it goes
@@ -45,9 +47,14 @@ pub enum Moderation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LlmVerdict {
+    /// An offer to sell the working product itself as the main item.
     Genuine,
+    /// Title enumerates sibling models for search visibility.
     StuffedTitle,
     Scam,
+    /// Not the product: a PC/laptop merely containing it, an accessory,
+    /// an empty box, a for-parts unit, a wanted ad…
+    Irrelevant,
 }
 
 /// One dated price observation for a deal — at most one per day, the
