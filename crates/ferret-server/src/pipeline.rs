@@ -35,6 +35,8 @@ pub struct PipelineStats {
     pub gone: u64,
     /// New ambiguous deals refined by the LLM pass this tick.
     pub refined: u64,
+    /// Watch matches recorded WITHOUT a push (noise verdict/heuristics).
+    pub suppressed: u64,
 }
 
 /// Process one source's fetch.
@@ -127,19 +129,34 @@ pub async fn process_listings(
             stats.updated_deals += 1;
         }
 
-        // -- optional LLM refinement: new ambiguous deals only (a re-scrape
-        //    never re-asks), fail-open on any error --
+        // -- optional LLM refinement, fail-open on any error. Runs for new
+        //    ambiguous deals AND for any unverdicted deal about to match a
+        //    watch: the verdict gates notifications (noise filter), so a
+        //    match must be looked at before it pings the user --
         let mut stored = stored;
+        let would_match = stored.moderation == ferret_domain::Moderation::None
+            && watches.iter().any(|w| matching::watch_matches(w, &stored));
         if let Some(refiner) = refiner
-            && was_new
-            && let Some(family_name) = stored.family.clone()
-            && refine::needs_refinement(Some(&family_name), &stored.models, &stored.flags)
+            && stored.llm_verdict.is_none()
+            && ((was_new
+                && stored.family.is_some()
+                && refine::needs_refinement(
+                    stored.family.as_deref(),
+                    &stored.models,
+                    &stored.flags,
+                ))
+                || would_match)
         {
+            let family_label = stored
+                .family
+                .clone()
+                .or_else(|| stored.category.clone())
+                .unwrap_or_else(|| "unknown".into());
             let input = RefineInput {
                 title: &stored.title,
                 price_cents: stored.price_cents,
                 currency: &stored.currency,
-                family: &family_name,
+                family: &family_label,
                 models: &stored.models,
                 flags: &stored.flags,
             };
@@ -183,7 +200,13 @@ pub async fn process_listings(
             }
             let fresh_match = db.insert_match(stored.id, watch.id).await?;
             let price_major = stored.price_cents as f64 / 100.0;
-            if fresh_match {
+            if fresh_match && !notification_worthy(&stored) {
+                // match recorded (visible in the UI with its badges) but
+                // the push is suppressed — noise, per verdict/heuristics
+                stats.suppressed += 1;
+                tracing::info!(deal = %stored.id, watch = %watch.name, title = stored.title,
+                    "match suppressed as noise");
+            } else if fresh_match {
                 let mut tags: Vec<String> = vec!["moneybag".into()];
                 tags.extend(stored.flags.iter().map(flag_tag));
                 notifier
@@ -199,6 +222,7 @@ pub async fn process_listings(
             } else if let Some(prev) = db.notified_price(stored.id, watch.id).await?
                 && (stored.price_cents as f64)
                     <= (prev as f64) * (1.0 - scrape.renotify_drop_pct / 100.0)
+                && notification_worthy(&stored)
             {
                 // known match, but the price dropped since we last pinged
                 let mut tags: Vec<String> = vec!["chart_with_downwards_trend".into()];
@@ -229,6 +253,18 @@ pub async fn process_listings(
     }
 
     Ok(stats)
+}
+
+/// Should a watch match ping the user? Aggressive noise policy: an LLM
+/// verdict of stuffed-title/scam suppresses the push; without a verdict
+/// (LLM off or failed) the possible-stuffing heuristic suppresses it.
+/// Suppressed matches stay visible in the UI with their badges.
+fn notification_worthy(deal: &Deal) -> bool {
+    match deal.llm_verdict {
+        Some(ferret_domain::LlmVerdict::StuffedTitle | ferret_domain::LlmVerdict::Scam) => false,
+        Some(ferret_domain::LlmVerdict::Genuine) => true,
+        None => !deal.flags.contains(&Flag::PossibleStuffing),
+    }
 }
 
 fn flag_tag(flag: &Flag) -> String {
@@ -275,6 +311,7 @@ mod tests {
         vec![ProductFamily {
             name: "nvidia-rtx".into(),
             models: ["3070", "3080", "3090", "4080", "4090"].map(String::from).to_vec(),
+            context: vec![],
         }]
     }
 
@@ -451,10 +488,15 @@ mod tests {
         let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals.len(), 1);
         assert!(deals[0].flags.contains(&ferret_domain::Flag::PossibleStuffing));
-        // still notified — stuffing is a signal, not a filter
-        let sent = notifier.sent.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].1.contains("possible-stuffing"), "flag rides in the tags");
+        // noise policy: the match is recorded and visible, the push is not
+        assert_eq!(notifier.sent.lock().unwrap().len(), 0, "stuffed = no push");
+        assert!(!db.list_deals(only_watch(&db).await, false).await.unwrap().is_empty(),
+            "match still recorded for the UI");
+    }
+
+    /// The single test watch's id (setup creates exactly one).
+    async fn only_watch(db: &Db) -> Option<uuid::Uuid> {
+        Some(db.list_watches().await.unwrap()[0].id)
     }
 
     #[tokio::test]
@@ -481,9 +523,11 @@ mod tests {
         assert_eq!(deals[0].llm_verdict, Some(LlmVerdict::StuffedTitle));
         assert_eq!(deals[0].llm_reason.as_deref(), Some("accessory listing"));
         assert_eq!(deals[0].capacity_gb, Some(10), "empty capacity filled by LLM");
-        // heuristic signal untouched, deal still matched + notified
+        // heuristic signal untouched; match recorded but the stuffed-title
+        // verdict suppresses the push (noise policy)
         assert!(deals[0].flags.contains(&ferret_domain::Flag::PossibleStuffing));
-        assert_eq!(notifier.sent.lock().unwrap().len(), 1);
+        assert_eq!(notifier.sent.lock().unwrap().len(), 0);
+        assert_eq!(stats.suppressed, 1);
     }
 
     #[tokio::test]
@@ -526,12 +570,14 @@ mod tests {
         let deals = db.list_deals(None, false).await.unwrap();
         assert_eq!(deals.len(), 1, "deal persisted despite LLM failure");
         assert_eq!(deals[0].llm_verdict, None);
-        // heuristic pipeline unaffected: match + notification still fired
-        assert_eq!(notifier.sent.lock().unwrap().len(), 1);
+        // no verdict → heuristics gate: the possible-stuffing flag
+        // suppresses the push, the match itself is recorded
+        assert_eq!(notifier.sent.lock().unwrap().len(), 0);
+        assert_eq!(stats.suppressed, 1);
     }
 
     #[tokio::test]
-    async fn clean_listing_never_touches_the_llm() {
+    async fn llm_calls_go_to_matches_and_ambiguity_only() {
         use ferret_domain::LlmVerdict;
         let (db, notifier) = setup().await;
         let refiner = MockRefiner::returning(crate::llm::Refinement {
@@ -543,14 +589,20 @@ mod tests {
         run_with(
             &db,
             vec![
-                listing("RTX 3080 FE occasion", "450 €", "https://ex.com/1"), // clean
-                listing("4TB IronWolf NAS", "90 €", "https://ex.com/2"),      // no family
+                // clean AND matches the watch → one gate call, then notified
+                listing("RTX 3080 FE occasion", "450 €", "https://ex.com/1"),
+                // no family, no match → never touches the LLM
+                listing("4TB IronWolf NAS", "90 €", "https://ex.com/2"),
             ],
             &notifier,
             Some(&refiner),
         )
         .await;
-        assert_eq!(refiner.calls(), 0, "common case must not burn LLM calls");
+        assert_eq!(refiner.calls(), 1, "one call: the notification gate on the match");
+        assert_eq!(notifier.sent.lock().unwrap().len(), 1, "genuine verdict → push goes out");
+        let deals = db.list_deals(None, false).await.unwrap();
+        let matched: Vec<_> = deals.iter().filter(|d| d.llm_verdict.is_some()).collect();
+        assert_eq!(matched.len(), 1, "only the matched deal got a verdict");
     }
 
     #[tokio::test]

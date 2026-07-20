@@ -17,6 +17,9 @@ pub struct TickStats {
     pub notified: u64,
     pub gone: u64,
     pub refined: u64,
+    /// Matches recorded without a push (noise verdict/heuristics).
+    #[serde(default)]
+    pub suppressed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
