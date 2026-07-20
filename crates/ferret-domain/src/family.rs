@@ -15,6 +15,11 @@ pub struct ProductFamily {
     /// Sibling model tokens, matched word-bounded case-insensitive,
     /// e.g. ["3060", "3070", "3080", "3090", "4080"].
     pub models: Vec<String>,
+    /// When non-empty, model hits only count if one of these words also
+    /// appears in the title — "Dell Optiplex 3080" stops matching
+    /// nvidia-rtx unless "rtx"/"geforce" is present. Empty = no gate.
+    #[serde(default)]
+    pub context: Vec<String>,
 }
 
 /// Result of matching a title against the family tables.
@@ -36,6 +41,16 @@ pub struct FamilyMatch {
 pub fn match_families(title: &str, families: &[ProductFamily]) -> FamilyMatch {
     let mut best = FamilyMatch::default();
     for family in families {
+        // context gate: model numbers alone are ambiguous ("Optiplex 3080")
+        if !family.context.is_empty()
+            && !family.context.iter().any(|word| {
+                Regex::new(&format!(r"(?i)\b{}\b", escape(word)))
+                    .map(|re| re.is_match(title))
+                    .unwrap_or(false)
+            })
+        {
+            continue;
+        }
         let hits: Vec<String> = family
             .models
             .iter()
@@ -74,7 +89,25 @@ mod tests {
             models: ["2080", "3060", "3070", "3080", "3090", "4080", "4090"]
                 .map(String::from)
                 .to_vec(),
+            context: vec![],
         }
+    }
+
+    #[test]
+    fn context_words_gate_bare_model_numbers() {
+        let gated = ProductFamily {
+            context: vec!["rtx".into(), "geforce".into()],
+            ..gpu_family()
+        };
+        // the real-world false positive: a Dell Optiplex 3080 is a PC
+        let m = match_families("Dell Optiplex 3080 i5 + 32Go ram + Nvme", std::slice::from_ref(&gated));
+        assert_eq!(m, FamilyMatch::default(), "no context word → no match");
+
+        let m = match_families("RTX 3080 Founders Edition", std::slice::from_ref(&gated));
+        assert_eq!(m.models, vec!["3080"], "context word present → matches");
+
+        let m = match_families("Carte graphique GeForce 3080 10GB", &[gated]);
+        assert_eq!(m.models, vec!["3080"], "any context word works, case-insensitive");
     }
 
     #[test]
@@ -123,6 +156,7 @@ mod tests {
         let other = ProductFamily {
             name: "amd-rx".into(),
             models: vec!["6800".into(), "6900".into()],
+            context: vec![],
         };
         let m = match_families("RTX 3080 3090 vs RX 6800", &[gpu_family(), other]);
         assert_eq!(m.family.as_deref(), Some("nvidia-rtx"));

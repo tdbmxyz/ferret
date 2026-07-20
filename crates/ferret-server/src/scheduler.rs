@@ -143,6 +143,7 @@ async fn run_source(
                             notified = stats.notified,
                             gone = stats.gone,
                             refined = stats.refined,
+                            suppressed = stats.suppressed,
                             "tick done"
                         );
                         record_tick(
@@ -156,6 +157,7 @@ async fn run_source(
                                 notified: stats.notified,
                                 gone: stats.gone,
                                 refined: stats.refined,
+                                suppressed: stats.suppressed,
                             }),
                         )
                         .await;

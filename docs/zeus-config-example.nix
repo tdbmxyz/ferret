@@ -81,10 +81,14 @@
         {
           name = "nvidia-rtx";
           models = ["2060" "2070" "2080" "3060" "3070" "3080" "3090" "4060" "4070" "4080" "4090" "5080" "5090"];
+          # a bare model number needs one of these words in the title —
+          # keeps "Dell Optiplex 3080" (a PC) from matching GPU watches
+          context = ["rtx" "geforce" "nvidia" "gpu" "carte graphique"];
         }
         {
           name = "ddr4-kit";
           models = ["8GB" "16GB" "32GB" "64GB"];
+          context = ["ddr4" "ram" "dimm" "sodimm" "mémoire"];
         }
       ];
 

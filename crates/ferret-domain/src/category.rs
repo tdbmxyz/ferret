@@ -173,22 +173,26 @@ pub fn extract_specs(title: &str, category: &Category) -> HashMap<String, SpecVa
 }
 
 /// Which ACTIVE category does this title belong to? Alias hits count 2,
-/// enum-value hits (e.g. a model number) count 1; best nonzero score wins.
+/// enum-value hits (e.g. a model number) count 1; best score wins — but at
+/// least one ALIAS hit is required: a bare enum value is too ambiguous
+/// ("Dell Optiplex 3080" contains a GPU model number without being one).
 pub fn categorize<'a>(title: &str, categories: &'a [Category]) -> Option<&'a Category> {
     categories
         .iter()
         .filter(|c| c.status == CategoryStatus::Active)
-        .map(|c| {
-            let alias_hits = c.aliases.iter().filter(|a| word_bounded(title, a)).count() * 2;
+        .filter_map(|c| {
+            let alias_hits = c.aliases.iter().filter(|a| word_bounded(title, a)).count();
+            if alias_hits == 0 {
+                return None;
+            }
             let value_hits: usize = c
                 .specs
                 .iter()
                 .filter(|s| s.kind == SpecKind::Enum)
                 .map(|s| s.allowed_values.iter().filter(|v| word_bounded(title, v)).count())
                 .sum();
-            (alias_hits + value_hits, c)
+            Some((alias_hits * 2 + value_hits, c))
         })
-        .filter(|(score, _)| *score > 0)
         .max_by_key(|(score, _)| *score)
         .map(|(_, c)| c)
 }
@@ -332,8 +336,10 @@ mod tests {
         let cats = [hdd(), gpu()];
         assert_eq!(categorize("Seagate IronWolf 4To NAS", &cats).unwrap().slug, "hdd");
         assert_eq!(categorize("RTX 3080 Founders", &cats).unwrap().slug, "gpu");
-        // bare model number, no alias — enum value hit still categorizes
-        assert_eq!(categorize("MSI 3080 Ventus", &cats).unwrap().slug, "gpu");
+        // noise policy: a bare enum value without any alias hit does NOT
+        // categorize — "Dell Optiplex 3080" is a PC, not a GPU. Precision
+        // over recall; aliases are user-editable to widen coverage.
+        assert!(categorize("Dell Optiplex 3080 i5", &cats).is_none());
         assert!(categorize("Chaise de bureau", &cats).is_none());
     }
 

@@ -57,7 +57,12 @@ scheduler (per source) → fetch → normalize → extract attributes
 ```
 
 Heuristic flags (`possible-stuffing`, `price-outlier`) and the LLM verdict
-are signals shown to the user, never hard filters.
+never hide a deal — everything scraped stays visible with its badges. They
+DO gate notifications: a stuffed-title/scam verdict (or, without an LLM,
+the possible-stuffing flag) records the watch match silently instead of
+pushing. Family `context` words and the category alias requirement keep
+bare model numbers ("Dell Optiplex 3080") from matching product watches
+at all; unverdicted deals get one LLM look before their first push.
 
 ## Deployment (NixOS)
 

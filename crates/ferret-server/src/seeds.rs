@@ -52,12 +52,16 @@ pub fn builtin(families: &[ProductFamily]) -> Vec<Category> {
             vec![spec_number("capacity", "Capacity", "GB")],
         ),
     ];
-    // each family table becomes a category with its model enum
+    // each family table becomes a category with its model enum; aliases
+    // come from the family's context words (categorize requires an alias
+    // hit — bare model numbers are too ambiguous)
     for family in families {
+        let aliases: Vec<&str> =
+            family.context.iter().map(String::as_str).chain([family.name.as_str()]).collect();
         seeds.push(category(
             &family.name,
             &family.name,
-            &[],
+            &aliases,
             vec![CategorySpec {
                 key: "model".into(),
                 label: "Model".into(),
