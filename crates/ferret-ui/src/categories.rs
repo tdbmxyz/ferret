@@ -191,6 +191,8 @@ fn editor_view(editor: Editor) -> impl IntoView {
     let is_new = editor.original.is_none();
     let instruction = RwSignal::new(String::new());
     let asking = RwSignal::new(false);
+    let status_res: crate::status::StatusResource = expect_context();
+    let ask_elapsed = crate::status::elapsed_while(asking);
     let sync_shared = RwSignal::new(true);
     // the revision conversation: every ask continues where the last ended
     let chat = RwSignal::new(Vec::<ferret_domain::ChatTurn>::new());
@@ -290,7 +292,15 @@ fn editor_view(editor: Editor) -> impl IntoView {
                     prop:value=instruction
                     on:input=move |ev| instruction.set(event_target_value(&ev))/>
                 <button on:click=ask_llm disabled=move || asking.get()>
-                    {move || if asking.get() { "Asking…" } else { "Ask LLM" }}
+                    {move || if asking.get() {
+                        crate::status::llm_progress_label(
+                            "Asking",
+                            ask_elapsed.get(),
+                            crate::status::llm_avg_ms(&status_res, "revise"),
+                        )
+                    } else {
+                        "Ask LLM".to_string()
+                    }}
                 </button>
             </div>
             {move || {

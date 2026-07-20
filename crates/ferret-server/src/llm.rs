@@ -43,10 +43,31 @@ pub struct OpenAiRefiner {
     api_key: Option<String>,
     timeout: Duration,
     prompts: ferret_domain::PromptSet,
+    /// In-flight call count, shared with `/api/status` via the runtime.
+    busy: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Request log sink (None in unit tests).
+    db: Option<crate::db::Db>,
+}
+
+/// One logged LLM call (the llm_requests table).
+#[derive(Debug, Clone)]
+pub struct LlmLogEntry {
+    pub kind: String,
+    pub model: String,
+    pub duration_ms: i64,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
 }
 
 impl OpenAiRefiner {
-    fn from_effective(eff: &EffectiveLlm, prompts: ferret_domain::PromptSet) -> Self {
+    fn from_effective(
+        eff: &EffectiveLlm,
+        prompts: ferret_domain::PromptSet,
+        busy: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        db: Option<crate::db::Db>,
+    ) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(eff.timeout_secs))
@@ -58,6 +79,8 @@ impl OpenAiRefiner {
             api_key: eff.api_key.clone(),
             timeout: Duration::from_secs(eff.timeout_secs),
             prompts,
+            busy,
+            db,
         }
     }
 }
@@ -134,20 +157,29 @@ pub struct LlmRuntime {
     pub interpreter: Option<std::sync::Arc<dyn LlmInterpret>>,
     pub status: ferret_domain::LlmStatus,
     pub settings: ferret_domain::LlmSettings,
+    /// In-flight LLM calls, shared with the refiner ("LLM working" chip).
+    pub busy: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 pub type LlmHandle = std::sync::Arc<tokio::sync::RwLock<LlmRuntime>>;
 
-pub fn build_runtime(eff: EffectiveLlm, prompts: ferret_domain::PromptSet) -> LlmRuntime {
-    let client = eff
-        .enabled
-        .then(|| std::sync::Arc::new(OpenAiRefiner::from_effective(&eff, prompts)));
+pub fn build_runtime(
+    eff: EffectiveLlm,
+    prompts: ferret_domain::PromptSet,
+    db: Option<crate::db::Db>,
+) -> LlmRuntime {
+    let busy = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let client = eff.enabled.then(|| {
+        std::sync::Arc::new(OpenAiRefiner::from_effective(&eff, prompts, busy.clone(), db))
+    });
     LlmRuntime {
         refiner: client.clone().map(|c| c as std::sync::Arc<dyn LlmRefiner>),
         interpreter: client.map(|c| c as std::sync::Arc<dyn LlmInterpret>),
+        busy,
         status: ferret_domain::LlmStatus {
             enabled: eff.enabled,
             model: eff.enabled.then(|| eff.model.clone()),
+            ..Default::default()
         },
         settings: ferret_domain::LlmSettings {
             enabled: eff.enabled,
@@ -325,10 +357,12 @@ pub(crate) fn parse_response(body: &str) -> anyhow::Result<Refinement> {
 }
 
 impl OpenAiRefiner {
+    /// Returns the assistant content plus token usage when reported.
     async fn post_chat(
         &self,
         body: &serde_json::Value,
         timeout: Option<Duration>,
+        usage: &mut Option<(i64, i64)>,
     ) -> anyhow::Result<String> {
         let mut request = self.http.post(&self.url).json(body);
         if let Some(t) = timeout {
@@ -344,22 +378,62 @@ impl OpenAiRefiner {
             // surface the backend's own message ("model X not found"…)
             anyhow::bail!("{status}: {}", text.chars().take(300).collect::<String>().trim());
         }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && let (Some(p), Some(c)) =
+                (v["usage"]["prompt_tokens"].as_i64(), v["usage"]["completion_tokens"].as_i64())
+        {
+            *usage = Some((p, c));
+        }
         content_of(&text)
     }
 
     /// One structured chat call, resilient to backends that reject OR
     /// silently mangle `response_format`: any failure (HTTP or parse) on
     /// the structured attempt gets one plain retry — the prompts already
-    /// demand a bare JSON object.
+    /// demand a bare JSON object. Every call is timed and logged.
     async fn chat_json<T: serde::de::DeserializeOwned>(
+        &self,
+        kind: &str,
+        body: serde_json::Value,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<T> {
+        use std::sync::atomic::Ordering;
+        self.busy.fetch_add(1, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        let mut usage = None;
+        let result = self.chat_json_inner(body, timeout, &mut usage).await;
+        self.busy.fetch_sub(1, Ordering::SeqCst);
+        if let Some(db) = &self.db {
+            let entry = LlmLogEntry {
+                kind: kind.to_string(),
+                model: self.model.clone(),
+                duration_ms: start.elapsed().as_millis() as i64,
+                ok: result.is_ok(),
+                error: result.as_ref().err().map(|e| e.to_string()),
+                prompt_tokens: usage.map(|(p, _)| p),
+                completion_tokens: usage.map(|(_, c)| c),
+            };
+            let db = db.clone();
+            // fire-and-forget: the log must never slow or fail the call
+            tokio::spawn(async move {
+                if let Err(e) = db.log_llm_request(&entry).await {
+                    tracing::debug!(error = %e, "llm request log failed");
+                }
+            });
+        }
+        result
+    }
+
+    async fn chat_json_inner<T: serde::de::DeserializeOwned>(
         &self,
         mut body: serde_json::Value,
         timeout: Option<Duration>,
+        usage: &mut Option<(i64, i64)>,
     ) -> anyhow::Result<T> {
         fn parse<T: serde::de::DeserializeOwned>(content: &str) -> anyhow::Result<T> {
             Ok(serde_json::from_str(extract_json(content))?)
         }
-        let first = match self.post_chat(&body, timeout).await {
+        let first = match self.post_chat(&body, timeout, usage).await {
             Ok(content) => match parse(&content) {
                 Ok(v) => return Ok(v),
                 Err(e) => anyhow::anyhow!("{e} (content: {})", content.chars().take(120).collect::<String>()),
@@ -372,7 +446,7 @@ impl OpenAiRefiner {
         tracing::debug!(error = %first, "structured attempt failed — retrying plain");
         body.as_object_mut().expect("chat body is an object").remove("response_format");
         let content = self
-            .post_chat(&body, timeout)
+            .post_chat(&body, timeout, usage)
             .await
             .map_err(|e| anyhow::anyhow!("{first}; plain retry: {e}"))?;
         parse(&content).map_err(|e| anyhow::anyhow!("{first}; plain retry: {e}"))
@@ -390,7 +464,7 @@ impl OpenAiRefiner {
 #[async_trait::async_trait]
 impl LlmRefiner for OpenAiRefiner {
     async fn refine(&self, input: &RefineInput<'_>) -> anyhow::Result<Refinement> {
-        self.chat_json(request_body(&self.model, input, &self.prompts.refine), None).await
+        self.chat_json("refine", request_body(&self.model, input, &self.prompts.refine), None).await
     }
 }
 
@@ -663,6 +737,7 @@ impl LlmInterpret for OpenAiRefiner {
         web_context: &[String],
     ) -> anyhow::Result<LlmInterpretation> {
         self.chat_json(
+            "interpret",
             interpret_request_body(
                 &self.model,
                 text,
@@ -682,6 +757,7 @@ impl LlmInterpret for OpenAiRefiner {
         history: &[ferret_domain::ChatTurn],
     ) -> anyhow::Result<LlmProposal> {
         self.chat_json(
+            "revise",
             revise_request_body(&self.model, category, instruction, history, &self.prompts.revise),
             self.long_timeout(),
         )
@@ -835,7 +911,7 @@ mod tests {
     #[test]
     fn disabled_config_builds_no_refiner() {
         let eff = effective(&crate::config::LlmConfig::default(), None).unwrap();
-        let runtime = build_runtime(eff, default_prompts());
+        let runtime = build_runtime(eff, default_prompts(), None);
         assert!(runtime.refiner.is_none() && runtime.interpreter.is_none());
         assert!(!runtime.status.enabled && runtime.status.model.is_none());
     }
@@ -859,7 +935,7 @@ mod tests {
         assert_eq!(eff.api_key.as_deref(), Some("sk-x"));
         assert!(eff.from_override && eff.override_key_set);
 
-        let runtime = build_runtime(eff, default_prompts());
+        let runtime = build_runtime(eff, default_prompts(), None);
         assert!(runtime.refiner.is_some() && runtime.interpreter.is_some());
         assert_eq!(runtime.status.model.as_deref(), Some("conf-model"));
         assert!(runtime.settings.api_key_set && runtime.settings.from_override);

@@ -25,7 +25,8 @@ pub struct EditRequest(pub RwSignal<Option<Watch>>);
 struct FilterState {
     num_min: HashMap<String, String>,
     num_max: HashMap<String, String>,
-    enums: HashMap<String, String>,
+    /// Enum key → every selected value (empty = any).
+    enums: HashMap<String, Vec<String>>,
     bools: HashMap<String, bool>,
 }
 
@@ -41,12 +42,10 @@ impl FilterState {
                     s.num_max.insert(key.clone(), trim_float(*value));
                 }
                 SpecFilter::Eq { key, value } => {
-                    s.enums.insert(key.clone(), value.clone());
+                    s.enums.insert(key.clone(), vec![value.clone()]);
                 }
                 SpecFilter::AnyOf { key, values } => {
-                    if let Some(first) = values.first() {
-                        s.enums.insert(key.clone(), first.clone());
-                    }
+                    s.enums.insert(key.clone(), values.clone());
                 }
                 SpecFilter::Is { key, value } => {
                     s.bools.insert(key.clone(), *value);
@@ -68,9 +67,16 @@ impl FilterState {
                 filters.push(SpecFilter::Max { key: key.clone(), value });
             }
         }
-        for (key, value) in &self.enums {
-            if !value.is_empty() {
-                filters.push(SpecFilter::Eq { key: key.clone(), value: value.clone() });
+        for (key, values) in &self.enums {
+            match values.as_slice() {
+                [] => {}
+                [value] => {
+                    filters.push(SpecFilter::Eq { key: key.clone(), value: value.clone() })
+                }
+                many => filters.push(SpecFilter::AnyOf {
+                    key: key.clone(),
+                    values: many.to_vec(),
+                }),
             }
         }
         for (key, value) in &self.bools {
@@ -79,6 +85,17 @@ impl FilterState {
             }
         }
         filters
+    }
+
+    fn toggle_enum(&mut self, key: &str, value: &str, on: bool) {
+        let values = self.enums.entry(key.to_string()).or_default();
+        if on {
+            if !values.iter().any(|v| v == value) {
+                values.push(value.to_string());
+            }
+        } else {
+            values.retain(|v| v != value);
+        }
     }
 }
 
@@ -115,6 +132,8 @@ pub fn GuidedCreate() -> impl IntoView {
     let deals_tick = RwSignal::new(0u32);
     // LLM conversation refining the drafted proposal (reset per search)
     let revise_chat = RwSignal::new(Vec::<ChatTurn>::new());
+    let status_res: crate::status::StatusResource = expect_context();
+    let interpret_elapsed = crate::status::elapsed_while(busy);
 
     // an edit request loads the watch into the flow
     {
@@ -328,7 +347,15 @@ pub fn GuidedCreate() -> impl IntoView {
                 <input class="guided-text" placeholder="What are you hunting? (e.g. 4TB HDD)"
                     prop:value=text on:input=move |ev| text.set(event_target_value(&ev))/>
                 <button on:click=run_interpret.clone() disabled=move || busy.get()>
-                    {move || if busy.get() { "Interpreting…" } else { "Search" }}
+                    {move || if busy.get() {
+                        crate::status::llm_progress_label(
+                            "Interpreting",
+                            interpret_elapsed.get(),
+                            crate::status::llm_avg_ms(&status_res, "interpret"),
+                        )
+                    } else {
+                        "Search".to_string()
+                    }}
                 </button>
                 {move || interpretation.get().map(|_| view! {
                     <button type="button" on:click=move |_| reset()>"Cancel"</button>
@@ -431,6 +458,8 @@ fn proposal_card(
     let instruction = RwSignal::new(String::new());
     let asking = RwSignal::new(false);
     let revise_error = RwSignal::new(None::<String>);
+    let status_res: crate::status::StatusResource = expect_context();
+    let ask_elapsed = crate::status::elapsed_while(asking);
     let ask = {
         let proposal = proposal.clone();
         move |_| {
@@ -478,7 +507,15 @@ fn proposal_card(
                     prop:value=instruction
                     on:input=move |ev| instruction.set(event_target_value(&ev))/>
                 <button on:click=ask disabled=move || asking.get()>
-                    {move || if asking.get() { "Asking…" } else { "Ask LLM" }}
+                    {move || if asking.get() {
+                        crate::status::llm_progress_label(
+                            "Asking",
+                            ask_elapsed.get(),
+                            crate::status::llm_avg_ms(&status_res, "revise"),
+                        )
+                    } else {
+                        "Ask LLM".to_string()
+                    }}
                 </button>
             </div>
             {move || revise_error.get().map(|e| view! { <p class="error">{e}</p> })}
@@ -518,24 +555,31 @@ fn spec_controls(category: Category, filters: RwSignal<FilterState>) -> impl Int
                             .into_any()
                         }
                         SpecKind::Enum => {
-                            let ksel = key.clone();
+                            // one checkbox per value: several checked = "any of
+                            // these" (none checked = no filter)
                             view! {
-                                <label class="spec">
-                                    {spec.label.clone()}
-                                    <select on:change={let k = key.clone(); move |ev| filters.update(|f| { f.enums.insert(k.clone(), event_target_value(&ev)); })}>
-                                        <option value="" selected=move || filters.with(|f| f.enums.get(&ksel).is_none_or(|v| v.is_empty()))>"any"</option>
-                                        {spec.allowed_values.iter().map(|v| {
-                                            let (val, kcur) = (v.clone(), key.clone());
-                                            let vsel = v.clone();
-                                            view! {
-                                                <option value=val.clone()
-                                                    selected=move || filters.with(|f| f.enums.get(&kcur) == Some(&vsel))>
-                                                    {val.clone()}
-                                                </option>
-                                            }
-                                        }).collect_view()}
-                                    </select>
-                                </label>
+                                <div class="spec enum-spec">
+                                    <span>{format!("{}:", spec.label)}</span>
+                                    {spec.allowed_values.iter().map(|v| {
+                                        let (val, kcur) = (v.clone(), key.clone());
+                                        let (vsel, ktoggle, vtoggle) =
+                                            (v.clone(), key.clone(), v.clone());
+                                        view! {
+                                            <label class="enum-value">
+                                                <input type="checkbox"
+                                                    prop:checked=move || filters.with(|f| {
+                                                        f.enums.get(&kcur)
+                                                            .is_some_and(|vs| vs.contains(&vsel))
+                                                    })
+                                                    on:change=move |ev| filters.update(|f| {
+                                                        f.toggle_enum(&ktoggle, &vtoggle,
+                                                            event_target_checked(&ev));
+                                                    })/>
+                                                {val.clone()}
+                                            </label>
+                                        }
+                                    }).collect_view()}
+                                </div>
                             }
                             .into_any()
                         }

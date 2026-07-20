@@ -27,6 +27,9 @@ cargo run -p ferret-server        # reads ferret.toml / $FERRET_CONFIG
 cd crates/ferret-web && trunk serve   # dev frontend on :8081, proxies /api to :4800
 ```
 
+Ready-to-paste NixOS config with every source pre-filled:
+`docs/zeus-config-example.nix`.
+
 Configuration reference: `crates/ferret-server/ferret.example.toml`
 (declarative `[[sources]]`, the `[leboncoin]` plugin, `[[families]]` tables,
 `[llm]` refinement, `[notifications]` via ntfy).
