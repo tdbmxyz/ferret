@@ -216,6 +216,9 @@ pub const REFINE_PROMPT: &str =
        visibility.\n\
      - \"scam\": fraud signals — e.g. an implausibly low price for a supposedly \
        working unit.\n\
+     The tracked family and models come from the user's configuration and DO \
+     exist, including ones newer than your knowledge — never judge a listing by \
+     whether you know the model; judge only what the listing itself says.\n\
      Also extract the storage/RAM capacity in decimal gigabytes and the \
      condition (new/used/refurbished) when the title states them, else null. \
      Answer only with the JSON object.";
