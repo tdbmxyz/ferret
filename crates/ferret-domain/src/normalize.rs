@@ -13,8 +13,12 @@ const TRACKING_PARAMS: &[&str] = &[
 ];
 
 static PRICE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // number with optional thousands separators and optional decimal part
-    Regex::new(r"(\d{1,3}(?:[ \u{a0}\u{202f},.]\d{3})*|\d+)(?:[.,](\d{1,2}))?").unwrap()
+    // number with optional thousands separators and optional decimal part.
+    // The plain-digit run branch MUST come first: alternation is
+    // leftmost-first, and the separator branch would otherwise truncate
+    // "7000.00" to "700" (it matches 3 digits, finds no separator, stops —
+    // and no backtracking into the other branch ever happens).
+    Regex::new(r"(\d{4,}|\d{1,3}(?:[ \u{a0}\u{202f},.]\d{3})*)(?:[.,](\d{1,2}))?").unwrap()
 });
 
 /// Parse a scraped price string into `(cents, currency)`.
@@ -92,6 +96,24 @@ mod tests {
     #[test]
     fn parses_bare_integer_price() {
         assert_eq!(parse_price("120 €"), Some((12_000, "EUR".into())));
+    }
+
+    #[test]
+    fn four_plus_digit_prices_without_separator_keep_all_digits() {
+        // regression: a real 7000€ Leboncoin ad was parsed (and notified!)
+        // as 700.00€ — the separator branch matched "700" and stopped
+        assert_eq!(parse_price("7000.00 €"), Some((700_000, "EUR".into())));
+        assert_eq!(parse_price("1234 €"), Some((123_400, "EUR".into())));
+        assert_eq!(parse_price("1299.99 €"), Some((129_999, "EUR".into())));
+        assert_eq!(parse_price("12345,50"), Some((1_234_550, "EUR".into())));
+    }
+
+    #[test]
+    fn separator_styles_still_parse_after_the_fix() {
+        assert_eq!(parse_price("7 000,99 €"), Some((700_099, "EUR".into())));
+        assert_eq!(parse_price("7.000 €"), Some((700_000, "EUR".into())));
+        assert_eq!(parse_price("$12,345.67"), Some((1_234_567, "USD".into())));
+        assert_eq!(parse_price("1.23 €"), Some((123, "EUR".into())));
     }
 
     #[test]
