@@ -428,6 +428,42 @@ impl Db {
         Ok(())
     }
 
+    // ---- llm request log ----
+
+    pub async fn log_llm_request(&self, entry: &crate::llm::LlmLogEntry) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO llm_requests
+             (kind, model, created_at, duration_ms, ok, error, prompt_tokens, completion_tokens)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&entry.kind)
+        .bind(&entry.model)
+        .bind(Utc::now().to_rfc3339())
+        .bind(entry.duration_ms)
+        .bind(entry.ok)
+        .bind(&entry.error)
+        .bind(entry.prompt_tokens)
+        .bind(entry.completion_tokens)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Average duration of the last 20 successful calls per kind — the
+    /// UI's "usually takes ~N s" hint.
+    pub async fn llm_avg_ms(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let rows = sqlx::query(
+            "SELECT kind, CAST(AVG(duration_ms) AS INTEGER) AS avg_ms FROM (
+                 SELECT kind, duration_ms,
+                        ROW_NUMBER() OVER (PARTITION BY kind ORDER BY id DESC) AS rn
+                 FROM llm_requests WHERE ok = 1
+             ) WHERE rn <= 20 GROUP BY kind",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| (r.get("kind"), r.get("avg_ms"))).collect())
+    }
+
     // ---- price history ----
 
     pub async fn record_price(&self, family: &str, model: &str, price_cents: i64) -> Result<()> {

@@ -75,7 +75,13 @@ async fn status(State(state): State<AppState>) -> Result<Response, ApiError> {
     let mut sources: Vec<_> = state.statuses.read().await.values().cloned().collect();
     sources.sort_by(|a, b| a.source_id.cmp(&b.source_id));
     let watch_matches = state.db.count_matches().await?;
-    let llm = state.llm.read().await.status.clone();
+    let llm = {
+        let runtime = state.llm.read().await;
+        let mut llm = runtime.status.clone();
+        llm.busy = runtime.busy.load(std::sync::atomic::Ordering::SeqCst);
+        llm
+    };
+    let llm = ferret_domain::LlmStatus { avg_ms: state.db.llm_avg_ms().await?, ..llm };
     Ok(Json(ferret_domain::StatusResponse { sources, watch_matches, llm }).into_response())
 }
 
@@ -324,7 +330,7 @@ async fn apply_llm(
         Ok(eff) => {
             let prompts =
                 crate::llm::effective_prompts(crate::llm::load_prompts(&state.db).await.as_ref());
-            let runtime = crate::llm::build_runtime(eff, prompts);
+            let runtime = crate::llm::build_runtime(eff, prompts, Some(state.db.clone()));
             let settings = runtime.settings.clone();
             *state.llm.write().await = runtime;
             Ok(Json(settings).into_response())
@@ -380,7 +386,7 @@ async fn rebuild_prompts(state: &AppState) {
     if let Ok(eff) = crate::llm::effective(&state.search.config.llm, over.as_ref()) {
         let prompts =
             crate::llm::effective_prompts(crate::llm::load_prompts(&state.db).await.as_ref());
-        *state.llm.write().await = crate::llm::build_runtime(eff, prompts);
+        *state.llm.write().await = crate::llm::build_runtime(eff, prompts, Some(state.db.clone()));
     }
 }
 

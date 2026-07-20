@@ -244,6 +244,18 @@ textarea {
 }
 
 .spec { display: flex; align-items: center; gap: 0.4rem; color: var(--muted); }
+
+.enum-spec { flex-wrap: wrap; }
+.enum-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 0.1rem 0.6rem;
+  cursor: pointer;
+}
+.enum-value:has(input:checked) { border-color: var(--accent); color: var(--text); }
 .narrow { width: 5.5rem; }
 
 .guided-save { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0; }

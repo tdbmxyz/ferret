@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let llm_runtime = llm::build_runtime(
         llm::effective(&config.llm, llm_override.as_ref()).context("configuring llm")?,
         llm::effective_prompts(prompt_override.as_ref()),
+        Some(db.clone()),
     );
     if llm_runtime.status.enabled {
         tracing::info!(

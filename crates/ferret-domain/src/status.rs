@@ -50,6 +50,13 @@ impl SourceStatus {
 pub struct LlmStatus {
     pub enabled: bool,
     pub model: Option<String>,
+    /// LLM calls in flight right now (the "working" signal).
+    #[serde(default)]
+    pub busy: u32,
+    /// Average duration of recent successful calls, per kind
+    /// ("interpret", "revise", "refine") — the "usually ~N s" hint.
+    #[serde(default)]
+    pub avg_ms: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
