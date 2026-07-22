@@ -138,23 +138,33 @@ fn watch_row(watch: Watch) -> impl IntoView {
         }
     };
 
+    let show_chart = RwSignal::new(false);
     view! {
-        <li class="watch" class:inactive=!watch.active>
-            <div class="watch-main">
-                <span class="watch-name">
-                    {watch.name.clone()}
-                    " "
-                    <span class="badge ok">{move || format!("{} deals", match_count())}</span>
-                </span>
-                <span class="muted">{filters.join(" · ")}</span>
+        <li class="watch watch-block" class:inactive=!watch.active>
+            <div class="watch-row">
+                <div class="watch-main">
+                    <span class="watch-name">
+                        {watch.name.clone()}
+                        " "
+                        <span class="badge ok">{move || format!("{} deals", match_count())}</span>
+                    </span>
+                    <span class="muted">{filters.join(" · ")}</span>
+                </div>
+                <div class="watch-actions">
+                    <button on:click=move |_| show_chart.update(|s| *s = !*s)
+                        title="daily best/median price over this watch's matches">
+                        {move || if show_chart.get() { "hide history" } else { "history" }}
+                    </button>
+                    <button on:click=start_edit>"edit"</button>
+                    <button on:click=toggle>
+                        {if watch.active { "pause" } else { "resume" }}
+                    </button>
+                    <button class="danger" on:click=delete>"delete"</button>
+                </div>
             </div>
-            <div class="watch-actions">
-                <button on:click=start_edit>"edit"</button>
-                <button on:click=toggle>
-                    {if watch.active { "pause" } else { "resume" }}
-                </button>
-                <button class="danger" on:click=delete>"delete"</button>
-            </div>
+            {move || show_chart.get().then(|| view! {
+                <crate::price_chart::WatchPriceChart watch_id=watch_id/>
+            })}
         </li>
     }
 }

@@ -200,7 +200,10 @@ pub fn GuidedCreate() -> impl IntoView {
             min_price.track();
             max_price.track();
             let client = client.clone();
-            async move { client.deals(None, false).await.unwrap_or_default() }
+            async move {
+                let rows = client.deals(None, false).await.unwrap_or_default();
+                rows.into_iter().map(|r| r.deal).collect::<Vec<_>>()
+            }
         }
     });
     let preview_matches = move || {

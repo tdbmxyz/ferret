@@ -12,4 +12,6 @@ leptos.workspace = true
 chrono.workspace = true
 url.workspace = true
 uuid.workspace = true
-web-sys = { workspace = true, features = ["Window", "Storage", "Location"] }
+web-sys = { workspace = true, features = ["Window", "Storage", "Location", "Document", "Element", "HtmlElement", "CssStyleDeclaration"] }
+wasm-bindgen.workspace = true
+js-sys.workspace = true

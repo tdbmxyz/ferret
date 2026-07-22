@@ -1287,10 +1287,12 @@ dependencies = [
  "chrono",
  "ferret-client",
  "ferret-domain",
+ "js-sys",
  "leptos",
  "serde_json",
  "url",
  "uuid",
+ "wasm-bindgen",
  "web-sys",
 ]
 
