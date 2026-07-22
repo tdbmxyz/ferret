@@ -283,3 +283,14 @@ textarea {
 .editor-head input, .spec-row input { flex: 1 1 8rem; }
 .editor-head input.wide, .spec-row input.wide { flex: 2 1 14rem; }
 .editor input.narrow, .spec-row select { flex: 0 1 auto; }
+
+/* watch history chart */
+.watch-block { display: block; }
+.watch-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+.chart { width: 100%; height: 280px; margin-top: 0.6rem; }

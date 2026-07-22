@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/watches", get(list_watches).post(create_watch))
         .route("/api/watches/{id}", axum::routing::put(update_watch).delete(delete_watch))
+        .route("/api/watches/{id}/prices", get(watch_prices))
         .route("/api/deals", get(list_deals))
         .route("/api/deals/{id}/prices", get(deal_prices))
         .route("/api/deals/{id}/moderation", axum::routing::put(set_moderation))
@@ -141,7 +142,25 @@ async fn list_deals(
     State(state): State<AppState>,
     Query(q): Query<DealsQuery>,
 ) -> Result<Response, ApiError> {
-    Ok(Json(state.db.list_deals(q.watch_id, q.hidden).await?).into_response())
+    let deals = state.db.list_deals(q.watch_id, q.hidden).await?;
+    let ids: Vec<Uuid> = deals.iter().map(|d| d.id).collect();
+    let mut matches = state.db.matches_for(&ids).await?;
+    let rows: Vec<ferret_domain::DealRow> = deals
+        .into_iter()
+        .map(|deal| ferret_domain::DealRow {
+            matches: matches.remove(&deal.id).unwrap_or_default(),
+            deal,
+        })
+        .collect();
+    Ok(Json(rows).into_response())
+}
+
+/// Daily min/median price over the watch's matched deals — the chart data.
+async fn watch_prices(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    Ok(Json(state.db.watch_prices(id).await?).into_response())
 }
 
 #[derive(Deserialize)]

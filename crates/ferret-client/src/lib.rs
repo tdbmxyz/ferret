@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use ferret_domain::{
-    Category, ChatTurn, Deal, HealthResponse, Interpretation, LlmProbeRequest, LlmProbeResult,
+    Category, ChatTurn, DealRow, HealthResponse, Interpretation, LlmProbeRequest, LlmProbeResult,
     LlmSettings, LlmSettingsUpdate, PricePoint, ProductFamily, PromptSet, PromptsResponse,
     SearchJob, StatusResponse, Watch, WatchRequest,
 };
@@ -135,13 +135,21 @@ impl FerretClient {
 
     /// All deals, or one watch's matches when `watch_id` is set.
     /// `hidden = true` lists ONLY dismissed/banned deals (review view).
-    pub async fn deals(&self, watch_id: Option<Uuid>, hidden: bool) -> Result<Vec<Deal>> {
+    pub async fn deals(&self, watch_id: Option<Uuid>, hidden: bool) -> Result<Vec<DealRow>> {
         let path = match (watch_id, hidden) {
             (Some(id), h) => format!("api/deals?watch_id={id}&hidden={h}"),
             (None, true) => "api/deals?hidden=true".into(),
             (None, false) => "api/deals".into(),
         };
         self.get(&path).await
+    }
+
+    /// Daily min/median price over a watch's matched deals — chart data.
+    pub async fn watch_prices(
+        &self,
+        watch_id: Uuid,
+    ) -> Result<Vec<ferret_domain::WatchPricePoint>> {
+        self.get(&format!("api/watches/{watch_id}/prices")).await
     }
 
     /// Set the user verdict on a deal (dismiss / ban / restore to none).

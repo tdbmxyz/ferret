@@ -66,6 +66,37 @@ pub struct PricePoint {
     pub price_cents: i64,
 }
 
+/// Daily aggregate over every deal matched by one watch — the watch's
+/// price-history chart (min = best buy that day, median = the market).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WatchPricePoint {
+    /// ISO date (UTC).
+    pub day: String,
+    pub min_cents: i64,
+    pub median_cents: i64,
+    /// Deals observed that day.
+    pub count: i64,
+}
+
+/// One watch a deal matched, and whether that match was pushed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchInfo {
+    pub watch_id: Uuid,
+    pub watch_name: String,
+    /// Set when a notification went out (at that price).
+    pub notified_price_cents: Option<i64>,
+}
+
+/// API row of `GET /api/deals`: the deal plus its match outcomes, so the
+/// UI can always say whether (and why not) a deal was reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DealRow {
+    #[serde(flatten)]
+    pub deal: Deal,
+    #[serde(default)]
+    pub matches: Vec<MatchInfo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Deal {
     pub id: Uuid,

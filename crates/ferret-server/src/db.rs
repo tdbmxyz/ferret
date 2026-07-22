@@ -445,6 +445,69 @@ impl Db {
         Ok(())
     }
 
+    /// Daily min/median over every deal matched by the watch — its price
+    /// history. One row per day that had at least one price observation.
+    pub async fn watch_prices(
+        &self,
+        watch_id: Uuid,
+    ) -> Result<Vec<ferret_domain::WatchPricePoint>> {
+        let rows = sqlx::query(
+            "SELECT p.day, p.price_cents FROM deal_prices p
+             JOIN deal_matches m ON m.deal_id = p.deal_id
+             WHERE m.watch_id = ? ORDER BY p.day",
+        )
+        .bind(watch_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut days: std::collections::BTreeMap<String, Vec<i64>> = Default::default();
+        for r in rows {
+            days.entry(r.get("day")).or_default().push(r.get("price_cents"));
+        }
+        Ok(days
+            .into_iter()
+            .map(|(day, mut prices)| {
+                prices.sort_unstable();
+                ferret_domain::WatchPricePoint {
+                    min_cents: prices[0],
+                    median_cents: prices[(prices.len() - 1) / 2],
+                    count: prices.len() as i64,
+                    day,
+                }
+            })
+            .collect())
+    }
+
+    /// Match outcomes per deal (watch names + notified state), for many
+    /// deals in one query — the "was this reported?" column.
+    pub async fn matches_for(
+        &self,
+        deal_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<ferret_domain::MatchInfo>>> {
+        let mut map: std::collections::HashMap<Uuid, Vec<ferret_domain::MatchInfo>> =
+            Default::default();
+        for chunk in deal_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT m.deal_id, m.watch_id, m.notified_price_cents, w.name
+                 FROM deal_matches m JOIN watches w ON w.id = m.watch_id
+                 WHERE m.deal_id IN ({placeholders})"
+            );
+            let mut q = sqlx::query(&sql);
+            for id in chunk {
+                q = q.bind(id.to_string());
+            }
+            for row in q.fetch_all(&self.pool).await? {
+                let deal_id = parse_uuid(&row.get::<String, _>("deal_id"))?;
+                map.entry(deal_id).or_default().push(ferret_domain::MatchInfo {
+                    watch_id: parse_uuid(&row.get::<String, _>("watch_id"))?,
+                    watch_name: row.get("name"),
+                    notified_price_cents: row.get("notified_price_cents"),
+                });
+            }
+        }
+        Ok(map)
+    }
+
     // ---- settings ----
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
@@ -867,6 +930,49 @@ mod tests {
 
         let deals = db.list_deals(Some(w.id), false).await.unwrap();
         assert_eq!(deals.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watch_prices_aggregate_and_match_outcomes() {
+        let db = test_db().await;
+        let w = db
+            .create_watch(&WatchRequest {
+                name: "gpu watch".into(),
+                family: None,
+                model: None,
+                min_capacity_gb: None,
+                min_price_cents: None,
+                max_price_cents: None,
+                category: None,
+                spec_filters: vec![],
+                queries: vec![],
+                active: true,
+            })
+            .await
+            .unwrap();
+        // three matched deals with today's prices 400/450/500 €
+        let mut ids = Vec::new();
+        for (i, p) in [40_000i64, 45_000, 50_000].iter().enumerate() {
+            let (d, _) =
+                db.upsert_deal(&deal(&format!("https://ex.com/{i}"), *p)).await.unwrap();
+            db.insert_match(d.id, w.id).await.unwrap();
+            ids.push(d.id);
+        }
+        // one unmatched deal must not pollute the aggregate
+        db.upsert_deal(&deal("https://ex.com/x", 1_000)).await.unwrap();
+
+        let points = db.watch_prices(w.id).await.unwrap();
+        assert_eq!(points.len(), 1, "one day of history");
+        assert_eq!(points[0].min_cents, 40_000);
+        assert_eq!(points[0].median_cents, 45_000);
+        assert_eq!(points[0].count, 3);
+
+        // outcomes: one notified, others silent
+        db.mark_notified(ids[0], w.id, 40_000).await.unwrap();
+        let matches = db.matches_for(&ids).await.unwrap();
+        assert_eq!(matches[&ids[0]][0].watch_name, "gpu watch");
+        assert_eq!(matches[&ids[0]][0].notified_price_cents, Some(40_000));
+        assert_eq!(matches[&ids[1]][0].notified_price_cents, None);
     }
 
     #[tokio::test]

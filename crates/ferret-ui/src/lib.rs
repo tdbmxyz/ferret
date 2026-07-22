@@ -4,8 +4,10 @@
 
 mod about;
 mod categories;
+mod echarts;
 mod deals;
 mod guided;
+mod price_chart;
 mod settings;
 mod sparkline;
 mod status;

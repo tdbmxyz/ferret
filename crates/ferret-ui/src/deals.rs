@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use ferret_client::FerretClient;
-use ferret_domain::{Deal, DealStatus, Flag, LlmVerdict, Moderation, Watch};
+use ferret_domain::{Deal, DealRow, DealStatus, Flag, LlmVerdict, MatchInfo, Moderation, Watch};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use uuid::Uuid;
@@ -87,7 +87,7 @@ pub fn DealsView() -> impl IntoView {
                     <ul class="deals">
                         {deals
                             .into_iter()
-                            .map(|deal| view! { <DealCard deal=deal/> })
+                            .map(|row| view! { <DealCard row=row/> })
                             .collect_view()}
                     </ul>
                 }
@@ -98,7 +98,8 @@ pub fn DealsView() -> impl IntoView {
 }
 
 #[component]
-fn DealCard(deal: Deal) -> impl IntoView {
+fn DealCard(row: DealRow) -> impl IntoView {
+    let DealRow { deal, matches } = row;
     let client: FerretClient = expect_context();
     let expanded = RwSignal::new(false);
     let deal_id = deal.id;
@@ -116,6 +117,9 @@ fn DealCard(deal: Deal) -> impl IntoView {
     let currency = deal.currency.clone();
     let gone = deal.status == DealStatus::Gone;
     let mut badges: Vec<(String, &'static str)> = Vec::new();
+    // the report verdict comes first: EVERY row says whether it was
+    // pushed, and if not, why
+    badges.push(report_outcome(&deal, &matches));
     for flag in &deal.flags {
         match flag {
             Flag::PossibleStuffing => badges.push(("possible stuffing".into(), "warn")),
@@ -180,6 +184,44 @@ fn DealCard(deal: Deal) -> impl IntoView {
             {move || expanded.get().then(|| moderation_actions(deal_id, deal.moderation))}
         </li>
     }
+}
+
+/// One definitive answer per row: was this deal reported, and if not,
+/// why not — no more unexplained silence.
+fn report_outcome(deal: &Deal, matches: &[MatchInfo]) -> (String, &'static str) {
+    match deal.moderation {
+        Moderation::Dismissed => return ("not reported: dismissed by you".into(), "muted"),
+        Moderation::Banned => return ("not reported: banned by you".into(), "muted"),
+        Moderation::None => {}
+    }
+    if matches.is_empty() {
+        return ("not reported: no watch matches".into(), "muted");
+    }
+    let names = || {
+        matches.iter().map(|m| m.watch_name.as_str()).collect::<Vec<_>>().join(", ")
+    };
+    if matches.iter().any(|m| m.notified_price_cents.is_some()) {
+        return (format!("reported: {}", names()), "ok");
+    }
+    // matched but silent — name the gate that held it back
+    let reason = if deal.flags.contains(&Flag::WantedAd) {
+        "wanted ad"
+    } else {
+        match deal.llm_verdict {
+            Some(LlmVerdict::StuffedTitle) => "stuffed title",
+            Some(LlmVerdict::Scam) => "scam verdict",
+            Some(LlmVerdict::Irrelevant) => "not the product",
+            Some(LlmVerdict::Genuine) => "pending",
+            None => {
+                if deal.flags.contains(&Flag::PossibleStuffing) {
+                    "possible stuffing, no LLM verdict"
+                } else {
+                    "pending"
+                }
+            }
+        }
+    };
+    (format!("matched {} — muted: {reason}", names()), "warn")
 }
 
 /// Dismiss / ban / restore buttons on an expanded card. Dismiss hides the
